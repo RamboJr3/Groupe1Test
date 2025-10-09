@@ -131,51 +131,13 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE, CardName.CURSE
         ]:
             return DopynionResponseStr(game_id=game_id, decision=f"ACTION {card.value}")
-    # 3. Phase d'achat (jamais Curse, Province > Witch, Duchy/Estate seulement si Province épuisée)
+    # PHASE D'ACHAT MINIMALE POUR DEBUG : 3 Copper => Silver, sinon END_TURN
     nb_copper = hand.get(CardName.COPPER, 0)
-    nb_silver = hand.get(CardName.SILVER, 0)
-    nb_gold = hand.get(CardName.GOLD, 0)
-    nb_witch = me.deck.quantities.get(CardName.WITCH, 0) if hasattr(me, 'deck') and me.deck and me.deck.quantities else 0
-    money = nb_copper * 1 + nb_silver * 2 + nb_gold * 3
-    provinces_left = stock.get(CardName.PROVINCE, 0)
-    # Priorité : Province > Witch (si on en a moins que 2 ou moins que Provinces restantes)
-    if money >= 8 and provinces_left > 0:
-        print("[DEBUG] Achat: Province")
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
-    # Acheter Witch si on en a moins que 2 ou moins que Provinces restantes
-    if money >= 5 and stock.get(CardName.WITCH, 0) > 0:
-        if nb_witch < 2 or nb_witch < provinces_left:
-            print("[DEBUG] Achat: Witch")
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.WITCH.value}")
-    # Duchy/Estate seulement si Province épuisée
-    if provinces_left == 0:
-        if money >= 5 and stock.get(CardName.DUCHY, 0) > 0:
-            print("[DEBUG] Achat: Duchy")
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.DUCHY.value}")
-        if money >= 2 and stock.get(CardName.ESTATE, 0) > 0 and stock.get(CardName.DUCHY, 0) == 0:
-            print("[DEBUG] Achat: Estate")
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.ESTATE.value}")
-    # Cas spécial : 1 gold, 2 silver, 1 copper (et assez pour Province)
-    if nb_gold == 1 and nb_silver == 2 and nb_copper == 1 and provinces_left > 0:
-        print("[DEBUG] Achat: Province (cas spécial)")
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
-    # Conversion Copper -> Silver
     if nb_copper == 3 and stock.get(CardName.SILVER, 0) > 0:
         print("[DEBUG] Achat: Silver (conversion 3 Copper)")
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.SILVER.value}")
-    # Conversion Silver -> Gold
-    if nb_silver == 3 and stock.get(CardName.GOLD, 0) > 0:
-        print("[DEBUG] Achat: Gold (conversion 3 Silver)")
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.GOLD.value}")
-    # Actions puissantes (jamais Curse, Witch déjà gérée)
-    for card in [CardName.COUNCILROOM, CardName.DISTANTSHORE, CardName.FARMINGVILLAGE]:
-        if stock.get(card, 0) > 0:
-            print(f"[DEBUG] Achat: {card.value}")
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {card.value}")
-    # Jamais acheter Curse
-    # Sinon, acheter Copper pour relancer la boucle
-    print("[DEBUG] Achat: Copper (fallback)")
-    return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.COPPER.value}")
+    print("[DEBUG] Aucun achat possible, END_TURN")
+    return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
 
 @app.get("/end_game")
