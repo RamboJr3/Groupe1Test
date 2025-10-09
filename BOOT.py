@@ -39,7 +39,9 @@ COST = {
     CardName.WOODCUTTER: 3,
     CardName.SMITHY: 4,
     CardName.MARKET: 5,
+    CardName.WITCH: 5,          # ⬅️ NEW
 }
+
 
 # --- EFFETS D'ACTIONS (actions, buys, coins_bonus, draw) ---
 EFFECTS: dict[str, tuple[int, int, int, int]] = {
@@ -49,7 +51,9 @@ EFFECTS: dict[str, tuple[int, int, int, int]] = {
     "WOODCUTTER": (0, 1, 2, 0),
     "SMITHY":     (0, 0, 0, 3),
     "MARKET":     (1, 1, 1, 1),
+    "WITCH":      (0, 0, 0, 2),  # ⬅️ +2 cartes ; les Malédictions sont appliquées par l’arbitre
 }
+
 
 #####################################################
 # Data model for responses
@@ -171,9 +175,15 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     # ---- PHASE ACTION ----
     if ts["actions"] > 0:
         action_priority = [
-            CardName.VILLAGE, CardName.FESTIVAL, CardName.MARKET,
-            CardName.LABORATORY, CardName.SMITHY, CardName.WOODCUTTER,
-        ]
+    CardName.VILLAGE,
+    CardName.FESTIVAL,
+    CardName.MARKET,
+    CardName.LABORATORY,
+    CardName.WITCH,      # ⬅️ on lance l’attaque après avoir sécurisé les +Actions
+    CardName.SMITHY,
+    CardName.WOODCUTTER,
+]
+
         for a in action_priority:
             if hq(a) > 0 and a.name in EFFECTS:
                 acts, buys, coins, _ = EFFECTS[a.name]
@@ -213,9 +223,15 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         # 2) Gold si possible
         r = try_buy(CardName.GOLD)
         if r: return r
+        print(f"[play] WITCH available? stock_curse={stock.get(CardName.CURSE,0)} in_stock_witch={in_stock(CardName.WITCH)}")
+        # 3) Palier 5$ : Market / Festival / Witch (si Curse dispo) puis Duchy
+        five_cost_candidates = [CardName.MARKET, CardName.FESTIVAL]
+        # Witch prioritaire si la pile Malédiction n'est pas vide
+        if stock.get(CardName.CURSE, 0) > 0:
+            five_cost_candidates.append(CardName.WITCH)
+        five_cost_candidates.append(CardName.DUCHY)
 
-        # 3) Moteur à 5$ : Market > Festival > Duchy (si on veut sécuriser des PV quand moteur tourne)
-        for cand in (CardName.MARKET, CardName.FESTIVAL, CardName.DUCHY):
+        for cand in five_cost_candidates:
             r = try_buy(cand)
             if r: return r
 
