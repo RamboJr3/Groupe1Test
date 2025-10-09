@@ -94,7 +94,7 @@ def root() -> str:
 
 @app.get("/name")
 def name() -> str:
-    return "Default player name"
+    return "Gin & ruin test"
 
 
 @app.get("/start_game")
@@ -108,8 +108,41 @@ def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
 
 
 @app.post("/play")
-def play(_game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
-    return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
+    # 1. Identification du joueur
+    me = next((p for p in game.players if p.name == "Gin & ruin test"), None)
+    if not me or not me.hand:
+        return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+    hand = me.hand.quantities
+    # 2. Phase d'action
+    action_priority = [CardName.VILLAGE, CardName.FESTIVAL, CardName.SMITHY]
+    # On joue la première action dispo dans l'ordre de priorité
+    for card in action_priority:
+        if hand.get(card, 0) > 0:
+            return DopynionResponseStr(game_id=game_id, decision=f"ACTION {card.value}")
+    # Sinon, joue n'importe quelle autre action (hors Copper/Silver/Gold/Estate/Duchy/Province)
+    for card, qty in hand.items():
+        if qty > 0 and card not in [CardName.COPPER, CardName.SILVER, CardName.GOLD, CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE]:
+            return DopynionResponseStr(game_id=game_id, decision=f"ACTION {card.value}")
+    # 3. Phase d'achat
+    nb_copper = hand.get(CardName.COPPER, 0)
+    nb_silver = hand.get(CardName.SILVER, 0)
+    nb_gold = hand.get(CardName.GOLD, 0)
+    # Cas spécial : 1 gold, 2 silver, 1 copper (et assez pour Province)
+    if nb_gold == 1 and nb_silver == 2 and nb_copper == 1:
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
+    # Conversion Copper -> Silver
+    if nb_copper == 3:
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.SILVER.value}")
+    # Conversion Silver -> Gold
+    if nb_silver == 3:
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.GOLD.value}")
+    # Si on ne peut plus rien convertir, acheter Province si possible
+    money = nb_copper * 1 + nb_silver * 2 + nb_gold * 3
+    if money >= 8:
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
+    # Sinon, acheter Copper pour relancer la boucle
+    return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.COPPER.value}")
 
 
 @app.get("/end_game")
