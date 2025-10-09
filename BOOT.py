@@ -16,18 +16,33 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-# État de tour par partie
-SESS: dict[str, dict] = {}   # { game_id: {"actions": int, "buys": int, "coins_bonus": int} }
+# --- ÉTAT DE TOUR ---
+SESS: dict[str, dict] = {}   # { game_id: {"actions": int, "buys": int, "coins_bonus": int, "coins_spent": int} }
 
 def init_turn_state(game_id: str) -> None:
-    SESS[game_id] = {"actions": 1, "buys": 1, "coins_bonus": 0}
+    SESS[game_id] = {"actions": 1, "buys": 1, "coins_bonus": 0, "coins_spent": 0}
 
 def get_turn_state(game_id: str) -> dict:
-    return SESS.setdefault(game_id, {"actions": 1, "buys": 1, "coins_bonus": 0})
+    return SESS.setdefault(game_id, {"actions": 1, "buys": 1, "coins_bonus": 0, "coins_spent": 0})
 
-# Effets connus (uniquement les cartes jouables pour le moment)
-# (actions, buys, coins_bonus, draw) – la pioche est gérée par l’arbitre entre deux /play
-EFFECTS: dict[str, tuple[int,int,int,int]] = {
+# --- COÛTS MINIMAUX UTILISÉS (cartes jouables aujourd'hui) ---
+COST = {
+    CardName.COPPER: 0,
+    CardName.SILVER: 3,
+    CardName.GOLD: 6,
+    CardName.ESTATE: 2,
+    CardName.DUCHY: 5,
+    CardName.PROVINCE: 8,
+    CardName.FESTIVAL: 5,
+    CardName.LABORATORY: 5,
+    CardName.VILLAGE: 3,
+    CardName.WOODCUTTER: 3,
+    CardName.SMITHY: 4,
+    CardName.MARKET: 5,
+}
+
+# --- EFFETS D'ACTIONS (actions, buys, coins_bonus, draw) ---
+EFFECTS: dict[str, tuple[int, int, int, int]] = {
     "FESTIVAL":   (2, 1, 2, 0),
     "LABORATORY": (1, 0, 0, 2),
     "VILLAGE":    (2, 0, 0, 1),
@@ -130,89 +145,97 @@ def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
 
 @app.post("/play")
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
-    # 0) Mon joueur = celui qui a une main visible
     me = next((p for p in game.players if p.hand is not None), None)
     if not me or not me.hand:
+        print(f"[play] game={game_id} no visible hand -> END_TURN")
         return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
-    hand = me.hand.quantities      # dict[CardName, int]
-    stock = game.stock.quantities  # dict[CardName, int]
+    hand = me.hand.quantities        # dict[CardName, int]
+    stock = game.stock.quantities    # dict[CardName, int]
     ts = get_turn_state(game_id)
 
-    # Helpers
-    def hq(card: CardName) -> int:
-        return hand.get(card, 0)
+    def hq(c: CardName) -> int: return hand.get(c, 0)
+    def in_stock(c: CardName) -> bool: return stock.get(c, 0) > 0
+    def money_treasures() -> int:
+        return hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3
+    def money_available() -> int:
+        # argent en main + bonus actions - déjà dépensé ce tour
+        return money_treasures() + ts["coins_bonus"] - ts["coins_spent"]
 
-    def in_stock(card: CardName) -> bool:
-        return stock.get(card, 0) > 0
+    print(f"[play] game={game_id} state_before: actions={ts['actions']} buys={ts['buys']} "
+          f"bonus={ts['coins_bonus']} spent={ts['coins_spent']} "
+          f"hand={{Cu:{hq(CardName.COPPER)}, Si:{hq(CardName.SILVER)}, Go:{hq(CardName.GOLD)}, "
+          f"Vi:{hq(CardName.VILLAGE)}, Sm:{hq(CardName.SMITHY)}, Ma:{hq(CardName.MARKET)}, Fe:{hq(CardName.FESTIVAL)}}} "
+          f"stock_Prov={stock.get(CardName.PROVINCE,0)}")
 
-    # ---- PHASE ACTION (une seule à la fois) ----
+    # ---- PHASE ACTION ----
     if ts["actions"] > 0:
-        # Ne proposer que des actions dont l'effet est connu dans EFFECTS
         action_priority = [
-            CardName.VILLAGE,
-            CardName.FESTIVAL,
-            CardName.MARKET,
-            CardName.LABORATORY,
-            CardName.SMITHY,
-            CardName.WOODCUTTER,
+            CardName.VILLAGE, CardName.FESTIVAL, CardName.MARKET,
+            CardName.LABORATORY, CardName.SMITHY, CardName.WOODCUTTER,
         ]
         for a in action_priority:
             if hq(a) > 0 and a.name in EFFECTS:
                 acts, buys, coins, _ = EFFECTS[a.name]
-                # Consomme 1 action, applique les bonus
                 ts["actions"] -= 1
                 ts["actions"] += acts
                 ts["buys"]    += buys
                 ts["coins_bonus"] += coins
-                # IMPORTANT : envoyer l'identifiant d'énum (UPPER), pas la value minuscule
+                print(f"[play] ACTION {a.name} | +acts={acts} +buys={buys} +$bonus={coins} "
+                      f"-> actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}")
                 return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
 
-    # ---- PHASE ACHAT (un seul par appel) ----
+    # ---- PHASE ACHAT ----
     if ts["buys"] > 0:
-        money = (
-            hq(CardName.COPPER) * 1 +
-            hq(CardName.SILVER) * 2 +
-            hq(CardName.GOLD)   * 3 +
-            ts["coins_bonus"]        # bonus de Festival/Market/Woodcutter joués ce tour
-        )
+        avail = money_available()
+        print(f"[play] BUY phase | money_treasures={money_treasures()} bonus={ts['coins_bonus']} "
+              f"spent={ts['coins_spent']} -> available={avail}")
 
-        # 1) Province en priorité si possible
-        if money >= 8 and in_stock(CardName.PROVINCE):
+        def try_buy(card: CardName) -> DopynionResponseStr | None:
+            cost = COST[card]
+            if ts["buys"] <= 0:
+                return None
+            if not in_stock(card):
+                return None
+            if avail < cost:
+                return None
+            # OK : on achète
             ts["buys"] -= 1
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.name}")
+            ts["coins_spent"] += cost
+            print(f"[play] BUY {card.name} (cost={cost}) -> buys={ts['buys']} spent={ts['coins_spent']} "
+                  f"available_now={money_available()}")
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {card.name}")
 
-        # 2) Payload économique
-        if money >= 6 and in_stock(CardName.GOLD):
-            ts["buys"] -= 1
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.GOLD.name}")
+        # 1) Province si possible
+        r = try_buy(CardName.PROVINCE)
+        if r: return r
 
-        # 3) Moteur d'actions / achats à 5$
-        if money >= 5:
-            for cand in (CardName.MARKET, CardName.FESTIVAL, CardName.DUCHY):
-                if in_stock(cand):
-                    ts["buys"] -= 1
-                    return DopynionResponseStr(game_id=game_id, decision=f"BUY {cand.name}")
+        # 2) Gold si possible
+        r = try_buy(CardName.GOLD)
+        if r: return r
 
-        # 4) Pioche brute à 4$
-        if money >= 4 and in_stock(CardName.SMITHY):
-            ts["buys"] -= 1
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.SMITHY.name}")
+        # 3) Moteur à 5$ : Market > Festival > Duchy (si on veut sécuriser des PV quand moteur tourne)
+        for cand in (CardName.MARKET, CardName.FESTIVAL, CardName.DUCHY):
+            r = try_buy(cand)
+            if r: return r
+
+        # 4) Smithy à 4$
+        r = try_buy(CardName.SMITHY)
+        if r: return r
 
         # 5) 3$ : Silver puis Village
-        if money >= 3:
-            for cand in (CardName.SILVER, CardName.VILLAGE):
-                if in_stock(cand):
-                    ts["buys"] -= 1
-                    return DopynionResponseStr(game_id=game_id, decision=f"BUY {cand.name}")
+        for cand in (CardName.SILVER, CardName.VILLAGE):
+            r = try_buy(cand)
+            if r: return r
 
         # 6) 2$ : Estate en dernier recours
-        if money >= 2 and in_stock(CardName.ESTATE):
-            ts["buys"] -= 1
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.ESTATE.name}")
+        r = try_buy(CardName.ESTATE)
+        if r: return r
 
-    # ---- Fin de tour si plus d'action ni d'achat possible ----
+    print(f"[play] nothing to do -> END_TURN | final_state: actions={ts['actions']} buys={ts['buys']} "
+          f"bonus={ts['coins_bonus']} spent={ts['coins_spent']}")
     return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+
 
 
 
@@ -233,26 +256,15 @@ async def confirm_discard_card_from_hand(
 
 
 @app.post("/discard_card_from_hand")
-async def discard_card_from_hand(
-    game_id: GameIdDependency,
-    decision_input: Hand,
-) -> DopynionResponseCardName:
-    # NE JAMAIS défausser Province en priorité : on écarte d’abord les cartes "mortes"
-    order = [
-        CardName.CURSE,
-        CardName.ESTATE,
-        CardName.COPPER,
-        CardName.SILVER,
-        CardName.GOLD,
-        # puis le reste
-    ]
-    # Choisir la première présente dans l'ordre ci-dessus
+async def discard_card_from_hand(game_id: GameIdDependency, decision_input: Hand) -> DopynionResponseCardName:
+    # ordre safe
+    order = [CardName.CURSE, CardName.ESTATE, CardName.COPPER, CardName.SILVER, CardName.GOLD]
     for c in order:
         if c in decision_input.hand:
+            print(f"[discard] choose {c.name}")
             return DopynionResponseCardName(game_id=game_id, decision=c)
-    # sinon, par défaut la première
+    print(f"[discard] default {decision_input.hand[0].name}")
     return DopynionResponseCardName(game_id=game_id, decision=decision_input.hand[0])
-
 
 
 
@@ -265,14 +277,12 @@ async def confirm_trash_card_from_hand(
 
 
 @app.post("/trash_card_from_hand")
-async def trash_card_from_hand(
-    game_id: GameIdDependency,
-    decision_input: Hand,
-) -> DopynionResponseCardName:
-    # Si on doit TRASH : curser > copper > estate, JAMAIS Province
+async def trash_card_from_hand(game_id: GameIdDependency, decision_input: Hand) -> DopynionResponseCardName:
     for c in [CardName.CURSE, CardName.COPPER, CardName.ESTATE]:
         if c in decision_input.hand:
+            print(f"[trash] choose {c.name}")
             return DopynionResponseCardName(game_id=game_id, decision=c)
+    print(f"[trash] default {decision_input.hand[0].name}")
     return DopynionResponseCardName(game_id=game_id, decision=decision_input.hand[0])
 
 
