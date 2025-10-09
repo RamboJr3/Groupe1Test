@@ -16,6 +16,26 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
+# État de tour par partie
+SESS: dict[str, dict] = {}   # { game_id: {"actions": int, "buys": int, "coins_bonus": int} }
+
+def init_turn_state(game_id: str) -> None:
+    SESS[game_id] = {"actions": 1, "buys": 1, "coins_bonus": 0}
+
+def get_turn_state(game_id: str) -> dict:
+    return SESS.setdefault(game_id, {"actions": 1, "buys": 1, "coins_bonus": 0})
+
+# Effets connus (uniquement les cartes jouables pour le moment)
+# (actions, buys, coins_bonus, draw) – la pioche est gérée par l’arbitre entre deux /play
+EFFECTS: dict[str, tuple[int,int,int,int]] = {
+    "FESTIVAL":   (2, 1, 2, 0),
+    "LABORATORY": (1, 0, 0, 2),
+    "VILLAGE":    (2, 0, 0, 1),
+    "WOODCUTTER": (0, 1, 2, 0),
+    "SMITHY":     (0, 0, 0, 3),
+    "MARKET":     (1, 1, 1, 1),
+}
+
 #####################################################
 # Data model for responses
 #####################################################
@@ -104,85 +124,104 @@ def start_game(game_id: GameIdDependency) -> DopynionResponseStr:
 
 @app.get("/start_turn")
 def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
+    init_turn_state(game_id)
     return DopynionResponseStr(game_id=game_id, decision="OK")
 
 
 @app.post("/play")
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
-    # 0) Trouver "moi" correctement : le seul joueur avec une main visible
+    # 0) Mon joueur = celui qui a une main visible
     me = next((p for p in game.players if p.hand is not None), None)
     if not me or not me.hand:
         return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
-    hand = me.hand.quantities           # Dict[CardName|str, int]
-    stock = game.stock.quantities       # Dict[CardName|str, int]
+    hand = me.hand.quantities      # dict[CardName, int]
+    stock = game.stock.quantities  # dict[CardName, int]
+    ts = get_turn_state(game_id)
 
-    # Helpers robustes : supporte keys CardName OU str
-    def qty(d, key_enum):
-        return d.get(key_enum, 0) or d.get(key_enum.value, 0) or d.get(key_enum.name, 0)
+    # Helpers
+    def hq(card: CardName) -> int:
+        return hand.get(card, 0)
 
-    def in_stock(d, key_enum):
-        return qty(d, key_enum) > 0
+    def in_stock(card: CardName) -> bool:
+        return stock.get(card, 0) > 0
 
-    # 1) Phase ACTION (1 seule) : priorités "existantes"
-    action_priority = [
-        CardName.VILLAGE,
-        CardName.FESTIVAL,
-        CardName.MARKET,
-        CardName.LABORATORY,
-        CardName.SMITHY,
-        CardName.WOODCUTTER,
-    ]
-    for a in action_priority:
-        if qty(hand, a) > 0:
-            return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.value}")
+    # ---- PHASE ACTION (une seule à la fois) ----
+    if ts["actions"] > 0:
+        # Ne proposer que des actions dont l'effet est connu dans EFFECTS
+        action_priority = [
+            CardName.VILLAGE,
+            CardName.FESTIVAL,
+            CardName.MARKET,
+            CardName.LABORATORY,
+            CardName.SMITHY,
+            CardName.WOODCUTTER,
+        ]
+        for a in action_priority:
+            if hq(a) > 0 and a.name in EFFECTS:
+                acts, buys, coins, _ = EFFECTS[a.name]
+                # Consomme 1 action, applique les bonus
+                ts["actions"] -= 1
+                ts["actions"] += acts
+                ts["buys"]    += buys
+                ts["coins_bonus"] += coins
+                # IMPORTANT : envoyer l'identifiant d'énum (UPPER), pas la value minuscule
+                return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
 
-    # 2) Phase ACHAT (1 seul)
-    nb_copper = qty(hand, CardName.COPPER)
-    nb_silver = qty(hand, CardName.SILVER)
-    nb_gold   = qty(hand, CardName.GOLD)
-    money = nb_copper*1 + nb_silver*2 + nb_gold*3
+    # ---- PHASE ACHAT (un seul par appel) ----
+    if ts["buys"] > 0:
+        money = (
+            hq(CardName.COPPER) * 1 +
+            hq(CardName.SILVER) * 2 +
+            hq(CardName.GOLD)   * 3 +
+            ts["coins_bonus"]        # bonus de Festival/Market/Woodcutter joués ce tour
+        )
 
-    # Province (prio scoring)
-    if money >= 8 and in_stock(stock, CardName.PROVINCE):
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
+        # 1) Province en priorité si possible
+        if money >= 8 and in_stock(CardName.PROVINCE):
+            ts["buys"] -= 1
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.name}")
 
-    # Gold (payload économique)
-    if money >= 6 and in_stock(stock, CardName.GOLD):
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.GOLD.value}")
+        # 2) Payload économique
+        if money >= 6 and in_stock(CardName.GOLD):
+            ts["buys"] -= 1
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.GOLD.name}")
 
-    # Market / Festival (si 5$) pour +Action/+Achat/+$
-    if money >= 5:
-        if in_stock(stock, CardName.MARKET):
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.MARKET.value}")
-        if in_stock(stock, CardName.FESTIVAL):
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.FESTIVAL.value}")
-        if in_stock(stock, CardName.DUCHY):
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.DUCHY.value}")
+        # 3) Moteur d'actions / achats à 5$
+        if money >= 5:
+            for cand in (CardName.MARKET, CardName.FESTIVAL, CardName.DUCHY):
+                if in_stock(cand):
+                    ts["buys"] -= 1
+                    return DopynionResponseStr(game_id=game_id, decision=f"BUY {cand.name}")
 
-    # Smithy (4$) = pioche brute
-    if money >= 4 and in_stock(stock, CardName.SMITHY):
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.SMITHY.value}")
+        # 4) Pioche brute à 4$
+        if money >= 4 and in_stock(CardName.SMITHY):
+            ts["buys"] -= 1
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.SMITHY.name}")
 
-    # Silver / Village (3$)
-    if money >= 3:
-        if in_stock(stock, CardName.SILVER):
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.SILVER.value}")
-        if in_stock(stock, CardName.VILLAGE):
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.VILLAGE.value}")
+        # 5) 3$ : Silver puis Village
+        if money >= 3:
+            for cand in (CardName.SILVER, CardName.VILLAGE):
+                if in_stock(cand):
+                    ts["buys"] -= 1
+                    return DopynionResponseStr(game_id=game_id, decision=f"BUY {cand.name}")
 
-    # Estate (2$) uniquement en tout dernier recours
-    if money >= 2 and in_stock(stock, CardName.ESTATE):
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.ESTATE.value}")
+        # 6) 2$ : Estate en dernier recours
+        if money >= 2 and in_stock(CardName.ESTATE):
+            ts["buys"] -= 1
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.ESTATE.name}")
 
-    # Sinon fin de tour
+    # ---- Fin de tour si plus d'action ni d'achat possible ----
     return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+
 
 
 
 @app.get("/end_game")
 def end_game(game_id: GameIdDependency) -> DopynionResponseStr:
+    SESS.pop(game_id, None)
     return DopynionResponseStr(game_id=game_id, decision="OK")
+
 
 
 @app.post("/confirm_discard_card_from_hand")
