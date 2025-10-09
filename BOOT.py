@@ -108,51 +108,76 @@ def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
 
 
 @app.post("/play")
-
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
-    # 1. Identification du joueur
-    me = next((p for p in game.players if p.name == "Gin & ruin test"), None)
+    # 0) Trouver "moi" correctement : le seul joueur avec une main visible
+    me = next((p for p in game.players if p.hand is not None), None)
     if not me or not me.hand:
         return DopynionResponseStr(game_id=game_id, decision="END_TURN")
-    hand = me.hand.quantities
-    stock = game.stock.quantities
-    # 2. Phase d'action : joue la première action dispo selon priorité
+
+    hand = me.hand.quantities           # Dict[CardName|str, int]
+    stock = game.stock.quantities       # Dict[CardName|str, int]
+
+    # Helpers robustes : supporte keys CardName OU str
+    def qty(d, key_enum):
+        return d.get(key_enum, 0) or d.get(key_enum.value, 0) or d.get(key_enum.name, 0)
+
+    def in_stock(d, key_enum):
+        return qty(d, key_enum) > 0
+
+    # 1) Phase ACTION (1 seule) : priorités "existantes"
     action_priority = [
-        CardName.WITCH, CardName.VILLAGE, CardName.FESTIVAL, CardName.SMITHY,
-        CardName.COUNCILROOM, CardName.DISTANTSHORE, CardName.FARMINGVILLAGE
+        CardName.VILLAGE,
+        CardName.FESTIVAL,
+        CardName.MARKET,
+        CardName.LABORATORY,
+        CardName.SMITHY,
+        CardName.WOODCUTTER,
     ]
-    for card in action_priority:
-        if hand.get(card, 0) > 0:
-            return DopynionResponseStr(game_id=game_id, decision=f"ACTION {card.value}")
-    # Sinon, joue n'importe quelle autre action (hors trésors et victoires)
-    for card, qty in hand.items():
-        if qty > 0 and card not in [
-            CardName.COPPER, CardName.SILVER, CardName.GOLD,
-            CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE, CardName.CURSE
-        ]:
-            return DopynionResponseStr(game_id=game_id, decision=f"ACTION {card.value}")
-    # 3. Phase d'achat inspirée de strategy.py/policy.py
-    nb_copper = hand.get(CardName.COPPER, 0)
-    nb_silver = hand.get(CardName.SILVER, 0)
-    nb_gold = hand.get(CardName.GOLD, 0)
-    money = nb_copper * 1 + nb_silver * 2 + nb_gold * 3
-    # Province
-    if money >= 8 and stock.get(CardName.PROVINCE, 0) > 0:
+    for a in action_priority:
+        if qty(hand, a) > 0:
+            return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.value}")
+
+    # 2) Phase ACHAT (1 seul)
+    nb_copper = qty(hand, CardName.COPPER)
+    nb_silver = qty(hand, CardName.SILVER)
+    nb_gold   = qty(hand, CardName.GOLD)
+    money = nb_copper*1 + nb_silver*2 + nb_gold*3
+
+    # Province (prio scoring)
+    if money >= 8 and in_stock(stock, CardName.PROVINCE):
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
-    # Gold
-    if money >= 6 and stock.get(CardName.GOLD, 0) > 0:
+
+    # Gold (payload économique)
+    if money >= 6 and in_stock(stock, CardName.GOLD):
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.GOLD.value}")
-    # Silver (conversion 3 Copper ou si possible)
-    if money >= 3 and stock.get(CardName.SILVER, 0) > 0:
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.SILVER.value}")
-    # Duchy
-    if money >= 5 and stock.get(CardName.DUCHY, 0) > 0:
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.DUCHY.value}")
-    # Estate
-    if money >= 2 and stock.get(CardName.ESTATE, 0) > 0:
+
+    # Market / Festival (si 5$) pour +Action/+Achat/+$
+    if money >= 5:
+        if in_stock(stock, CardName.MARKET):
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.MARKET.value}")
+        if in_stock(stock, CardName.FESTIVAL):
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.FESTIVAL.value}")
+        if in_stock(stock, CardName.DUCHY):
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.DUCHY.value}")
+
+    # Smithy (4$) = pioche brute
+    if money >= 4 and in_stock(stock, CardName.SMITHY):
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.SMITHY.value}")
+
+    # Silver / Village (3$)
+    if money >= 3:
+        if in_stock(stock, CardName.SILVER):
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.SILVER.value}")
+        if in_stock(stock, CardName.VILLAGE):
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.VILLAGE.value}")
+
+    # Estate (2$) uniquement en tout dernier recours
+    if money >= 2 and in_stock(stock, CardName.ESTATE):
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.ESTATE.value}")
-    # Sinon, END_TURN
+
+    # Sinon fin de tour
     return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+
 
 
 @app.get("/end_game")
@@ -173,11 +198,23 @@ async def discard_card_from_hand(
     game_id: GameIdDependency,
     decision_input: Hand,
 ) -> DopynionResponseCardName:
-    # Si une Province est en main, la défausser en priorité
-    if CardName.PROVINCE in decision_input.hand:
-        return DopynionResponseCardName(game_id=game_id, decision=CardName.PROVINCE)
-    # Sinon, défausser la première carte
+    # NE JAMAIS défausser Province en priorité : on écarte d’abord les cartes "mortes"
+    order = [
+        CardName.CURSE,
+        CardName.ESTATE,
+        CardName.COPPER,
+        CardName.SILVER,
+        CardName.GOLD,
+        # puis le reste
+    ]
+    # Choisir la première présente dans l'ordre ci-dessus
+    for c in order:
+        if c in decision_input.hand:
+            return DopynionResponseCardName(game_id=game_id, decision=c)
+    # sinon, par défaut la première
     return DopynionResponseCardName(game_id=game_id, decision=decision_input.hand[0])
+
+
 
 
 @app.post("/confirm_trash_card_from_hand")
@@ -193,6 +230,10 @@ async def trash_card_from_hand(
     game_id: GameIdDependency,
     decision_input: Hand,
 ) -> DopynionResponseCardName:
+    # Si on doit TRASH : curser > copper > estate, JAMAIS Province
+    for c in [CardName.CURSE, CardName.COPPER, CardName.ESTATE]:
+        if c in decision_input.hand:
+            return DopynionResponseCardName(game_id=game_id, decision=c)
     return DopynionResponseCardName(game_id=game_id, decision=decision_input.hand[0])
 
 
