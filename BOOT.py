@@ -108,39 +108,51 @@ def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
 
 
 @app.post("/play")
+
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     # 1. Identification du joueur
     me = next((p for p in game.players if p.name == "Gin & ruin test"), None)
     if not me or not me.hand:
         return DopynionResponseStr(game_id=game_id, decision="END_TURN")
     hand = me.hand.quantities
-    # 2. Phase d'action
-    action_priority = [CardName.VILLAGE, CardName.FESTIVAL, CardName.SMITHY]
-    # On joue la première action dispo dans l'ordre de priorité
+    stock = game.stock.quantities
+    # 2. Phase d'action (ajout des nouvelles cartes)
+    action_priority = [
+        CardName.VILLAGE, CardName.FESTIVAL, CardName.SMITHY,
+        CardName.WITCH, CardName.COUNCILROOM, CardName.DISTANTSHORE, CardName.FARMINGVILLAGE
+    ]
     for card in action_priority:
         if hand.get(card, 0) > 0:
             return DopynionResponseStr(game_id=game_id, decision=f"ACTION {card.value}")
-    # Sinon, joue n'importe quelle autre action (hors Copper/Silver/Gold/Estate/Duchy/Province)
+    # Sinon, joue n'importe quelle autre action (hors cartes non-action et malédiction)
     for card, qty in hand.items():
-        if qty > 0 and card not in [CardName.COPPER, CardName.SILVER, CardName.GOLD, CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE]:
+        if qty > 0 and card not in [
+            CardName.COPPER, CardName.SILVER, CardName.GOLD,
+            CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE, CardName.CURSE
+        ]:
             return DopynionResponseStr(game_id=game_id, decision=f"ACTION {card.value}")
-    # 3. Phase d'achat
+    # 3. Phase d'achat (jamais Curse)
     nb_copper = hand.get(CardName.COPPER, 0)
     nb_silver = hand.get(CardName.SILVER, 0)
     nb_gold = hand.get(CardName.GOLD, 0)
     # Cas spécial : 1 gold, 2 silver, 1 copper (et assez pour Province)
-    if nb_gold == 1 and nb_silver == 2 and nb_copper == 1:
+    if nb_gold == 1 and nb_silver == 2 and nb_copper == 1 and stock.get(CardName.PROVINCE, 0) > 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
     # Conversion Copper -> Silver
-    if nb_copper == 3:
+    if nb_copper == 3 and stock.get(CardName.SILVER, 0) > 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.SILVER.value}")
     # Conversion Silver -> Gold
-    if nb_silver == 3:
+    if nb_silver == 3 and stock.get(CardName.GOLD, 0) > 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.GOLD.value}")
-    # Si on ne peut plus rien convertir, acheter Province si possible
+    # Province si possible
     money = nb_copper * 1 + nb_silver * 2 + nb_gold * 3
-    if money >= 8:
+    if money >= 8 and stock.get(CardName.PROVINCE, 0) > 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
+    # Actions puissantes (jamais Curse)
+    for card in [CardName.WITCH, CardName.COUNCILROOM, CardName.DISTANTSHORE, CardName.FARMINGVILLAGE]:
+        if stock.get(card, 0) > 0:
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {card.value}")
+    # Jamais acheter Curse
     # Sinon, acheter Copper pour relancer la boucle
     return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.COPPER.value}")
 
