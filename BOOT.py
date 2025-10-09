@@ -282,6 +282,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
                 f"state actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}")
             return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
 
+
     # --------------------
     # Decide mode: engine-first or aggressive Duchy-steal
     # --------------------
@@ -293,20 +294,6 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
 
     # also consider buying Duchy opportunistically if we have many buys and medium money
     # engine condition: do we realistically have enough output to buy provinces reliably?
-    engine_ready = (money_available() >= ENGINE_PROVINCE_MONEY) or (treasure_value + ts["coins_bonus"] >= 8 and ts["buys"] >= 1)
-
-    print(f"[play] mode decision -> aggressive={aggressive_mode} engine_ready={engine_ready} money_avail={money_available()}")
-
-    # --------------------
-    # Decide mode: engine-first or aggressive Duchy-steal
-    # --------------------
-    aggressive_mode = False
-    if prov_left <= PROV_THRESHOLD:
-        aggressive_mode = True
-    if (max_opponent_score - my_score) >= SCORE_DELTA:
-        aggressive_mode = True
-
-    # also consider buying Duchy opportunistically if we have many buys and medium money
     engine_ready = (money_available() >= ENGINE_PROVINCE_MONEY) or (treasure_value + ts["coins_bonus"] >= 8 and ts["buys"] >= 1)
 
     print(f"[play] mode decision -> aggressive={aggressive_mode} engine_ready={engine_ready} money_avail={money_available()}")
@@ -462,6 +449,7 @@ def end_game(game_id: GameIdDependency) -> DopynionResponseStr:
         SESS.pop(game_id, None)
         SESS_LOCKS.pop(game_id, None)
     return DopynionResponseStr(game_id=game_id, decision="OK")
+
 
 
 
