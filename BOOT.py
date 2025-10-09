@@ -133,7 +133,7 @@ def root() -> str:
 
 @app.get("/name")
 def name() -> str:
-    return "Gin & ruin test"
+    return "Rhum & ruin"
 
 
 @app.get("/start_game")
