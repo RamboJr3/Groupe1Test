@@ -244,80 +244,113 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
 
     print(f"[play] mode decision -> aggressive={aggressive_mode} engine_ready={engine_ready} money_avail={money_available()}")
 
-        # ---- PHASE ACHAT (plan gagnant vs logs de l’ennemi) ----
+    # --------------------
+    # Decide mode: engine-first or aggressive Duchy-steal
+    # --------------------
+    aggressive_mode = False
+    if prov_left <= PROV_THRESHOLD:
+        aggressive_mode = True
+    if (max_opponent_score - my_score) >= SCORE_DELTA:
+        aggressive_mode = True
+
+    # also consider buying Duchy opportunistically if we have many buys and medium money
+    engine_ready = (money_available() >= ENGINE_PROVINCE_MONEY) or (treasure_value + ts["coins_bonus"] >= 8 and ts["buys"] >= 1)
+
+    print(f"[play] mode decision -> aggressive={aggressive_mode} engine_ready={engine_ready} money_avail={money_available()}")
+
+    # --------------------
+    # PHASE ACHAT — helpers D'ABORD (pour éviter NameError)
+    # --------------------
+    def can_buy(c: CardName) -> bool:
+        return ts["buys"] > 0 and stock.get(c, 0) and money_available() >= COST[c]
+
+    def do_buy(c: CardName) -> DopynionResponseStr:
+        cost = COST[c]
+        ts["buys"] -= 1
+        ts["coins_spent"] += cost
+        inc_owned(game_id, c)
+        print(f"[buy] BUY {c.name} cost={cost} -> buys_left={ts['buys']} spent={ts['coins_spent']} avail_now={money_available()}")
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
+
     if ts["buys"] > 0:
-        avail_before = money_available()
-        prov_left = stock.get(CardName.PROVINCE, 0)
-        my_score = getattr(me, "score", 0) or 0
-        max_opp = max((getattr(p, "score", 0) or 0) for p in game.players if p is not me) if game.players else 0
-
-        # modes
-        AGGRO_DUCHY = (prov_left <= 4) or ((max_opp - my_score) >= 4)
-
+        enemy_alive = any("equipe3" in (getattr(p, "name", "") or "").lower() for p in game.players)
         wc_cnt  = owned(game_id, CardName.WOODCUTTER)
         mk_cnt  = owned(game_id, CardName.MARKET)
         sm_cnt  = owned(game_id, CardName.SMITHY)
+        vg_cnt  = owned(game_id, CardName.VILLAGE)
+        wt_cnt  = owned(game_id, CardName.WITCH)
         au_cnt  = owned(game_id, CardName.SILVER) + owned(game_id, CardName.GOLD)
 
-        print(f"[buy] avail={avail_before} buys={ts['buys']} prov_left={prov_left} "
-              f"owned: WC={wc_cnt} MK={mk_cnt} SM={sm_cnt} AU={au_cnt} aggro_duchy={AGGRO_DUCHY}")
+        avail_before = money_available()
+        prov_left = stock.get(CardName.PROVINCE, 0)
+        curses_left = stock.get(CardName.CURSE, 0) if CardName.CURSE in stock else 0
+        AGGRO_DUCHY = (prov_left <= 4) or ((max_opponent_score - my_score) >= 4)
 
-        def can_buy(c: CardName) -> bool:
-            return ts["buys"] > 0 and in_stock(c) and money_available() >= COST[c]
+        print(f"[buy] avail={avail_before} buys={ts['buys']} prov_left={prov_left} curses_left={curses_left} "
+              f"owned: VG={vg_cnt} MK={mk_cnt} WT={wt_cnt} SM={sm_cnt} AU={au_cnt} aggro_duchy={AGGRO_DUCHY} enemy_alive={enemy_alive}")
 
-        def do_buy(c: CardName) -> DopynionResponseStr:
-            cost = COST[c]
-            ts["buys"] -= 1
-            ts["coins_spent"] += cost
-            inc_owned(game_id, c)
-            print(f"[buy] BUY {c.name} cost={cost} -> buys_left={ts['buys']} spent={ts['coins_spent']} avail_now={money_available()}")
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
+        # ======== MODE CANCER + SPEED ciblé Équipe3MaGueule ========
 
-        # 0) Province si possible (toujours)
+        # 0a) Si Équipe3MaGueule est en jeu et qu'il reste des Curses -> WITCH d'abord (jusqu'à 3)
+        if enemy_alive and curses_left > 0 and can_buy(CardName.WITCH) and wt_cnt < 3:
+            print("[anti-MaGueule] Full-curse mode -> BUY WITCH")
+            return do_buy(CardName.WITCH)
+
+        # 0b) Leurs +Actions dépendent de Village -> vider la pile VILLAGE pour casser leur moteur
+        #    (pose aussi les bases de nos propres +actions)
+        if enemy_alive and stock.get(CardName.VILLAGE, 0) > 0 and can_buy(CardName.VILLAGE) and vg_cnt < 3:
+            print("[anti-MaGueule] Deny engine -> BUY VILLAGE")
+            return do_buy(CardName.VILLAGE)
+
+        # 0c) Quand les Curses sont vides ET que la pile Village est basse, on accélère la fin
+        if enemy_alive and curses_left == 0 and stock.get(CardName.VILLAGE, 0) <= 2:
+            if can_buy(CardName.PROVINCE):
+                print("[anti-MaGueule] Endgame rush -> BUY PROVINCE")
+                return do_buy(CardName.PROVINCE)
+            if AGGRO_DUCHY and can_buy(CardName.DUCHY):
+                print("[anti-MaGueule] Endgame rush -> BUY DUCHY")
+                return do_buy(CardName.DUCHY)
+
+        # ======== PLAN STANDARD optimisé “cancer-speed” ========
+
+        # 1) Province si possible (toujours en premier hors cursemode)
         if can_buy(CardName.PROVINCE):
             return do_buy(CardName.PROVINCE)
 
-        # 1) Fin de partie / rattrapage : Duchy agressif
+        # 2) Si on doit rattraper / fin de partie : prendre Duchy tôt
         if AGGRO_DUCHY and can_buy(CardName.DUCHY):
             return do_buy(CardName.DUCHY)
 
-        # 2) Économie lourde : Gold à 6
-        if can_buy(CardName.GOLD):
+        # 3) À 5$ : Market OU Witch selon les Curses restantes
+        #    - si Curses encore là et qu'on n'a pas 2 Markets, Witch prime (cap 3 Witches total)
+        if curses_left > 0 and can_buy(CardName.WITCH) and wt_cnt < 3:
+            return do_buy(CardName.WITCH)
+        if can_buy(CardName.MARKET) and mk_cnt < 2:
+            return do_buy(CardName.MARKET)
+
+        # 4) Or : on réduit la gloutonnerie (cap 1) pour rester tempo + pression
+        if can_buy(CardName.GOLD) and owned(game_id, CardName.GOLD) < 1:
             return do_buy(CardName.GOLD)
 
-        # 3) Pièces moteur à 5 : Market en priorité (évite d’empiler des terminaux morts)
-        if can_buy(CardName.MARKET):
-            return do_buy(CardName.MARKET)
-        # 3.5) WITCH à 5$ si des Curses restent et qu'on ne casse pas le moteur
-        if in_stock(CardName.CURSE) and stock.get(CardName.CURSE, 0) > 0 and can_buy(CardName.WITCH):
-            # petite borne: évite d'empiler trop de terminaux sans +actions
-            if mk_cnt >= 1 or sm_cnt < 2:
-                return do_buy(CardName.WITCH)
-        # 4) Piocher pour trouver l’argent : Smithy à 4 (mais **cappe** sans +Actions)
-        #    - autorise 1–2 Smithy; si aucun Market/Village, limite SMITHY <= 2
-        if can_buy(CardName.SMITHY):
-            if mk_cnt >= 1 or sm_cnt < 2:
-                return do_buy(CardName.SMITHY)
+        # 5) À 4$ : Smithy si on a déjà au moins 1 source de +Action (Market ou Village)
+        if can_buy(CardName.SMITHY) and (mk_cnt + vg_cnt) >= 1 and sm_cnt < 2:
+            return do_buy(CardName.SMITHY)
 
-        # 5) Anti-spam Woodcutter : ne pas dépasser 1 (2 max si déjà au moins 1 Market)
-        if can_buy(CardName.WOODCUTTER):
-            wc_cap = 1 if mk_cnt == 0 else 2
-            if wc_cnt < wc_cap:
-                return do_buy(CardName.WOODCUTTER)
-
-        # 6) Pallier 3 : Silver (toujours mieux que re-spammer Woodcutter pour ton cas)
+        # 6) À 3$ : Silver > Woodcutter (évite les terminaux morts)
         if can_buy(CardName.SILVER):
             return do_buy(CardName.SILVER)
 
-        # 7) Duchy opportuniste si on a encore un buy et l’argent
+        # 7) Duchy opportuniste si on a l'argent
         if can_buy(CardName.DUCHY):
             return do_buy(CardName.DUCHY)
 
-        # 8) Estate dernier recours (éviter si possible)
+        # 8) Estate dernier recours
         if can_buy(CardName.ESTATE):
             return do_buy(CardName.ESTATE)
+
     print(f"[play] nothing to do -> END_TURN | state actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']} spent={ts['coins_spent']}")
     return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+
 
 
 
