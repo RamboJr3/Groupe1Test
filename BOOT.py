@@ -147,110 +147,143 @@ def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
     return DopynionResponseStr(game_id=game_id, decision="OK")
 
 
+# --- Constants de stratégie (tweakables) ---
+PROV_THRESHOLD = 4            # si <= ce nombre de provinces, switch agressif
+SCORE_DELTA = 4               # si un adversaire te distance >= ce delta, switch agressif
+ENGINE_PROVINCE_MONEY = 12    # argent cible dans un tour pour considérer qu'on peut faire Province(s)
+DOUBLE_PROVINCE_BUYS = 2      # si on a >= buys pour tenter double achet
+
 @app.post("/play")
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
+    # --- trouver "moi" ---
     me = next((p for p in game.players if p.hand is not None), None)
     if not me or not me.hand:
         print(f"[play] game={game_id} no visible hand -> END_TURN")
         return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
-    hand = me.hand.quantities        # dict[CardName, int]
-    stock = game.stock.quantities    # dict[CardName, int]
+    hand = me.hand.quantities        # dict[CardName,int]
+    stock = game.stock.quantities    # dict[CardName,int]
     ts = get_turn_state(game_id)
 
+    # helpers
     def hq(c: CardName) -> int: return hand.get(c, 0)
     def in_stock(c: CardName) -> bool: return stock.get(c, 0) > 0
     def money_treasures() -> int:
         return hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3
     def money_available() -> int:
-        # argent en main + bonus actions - déjà dépensé ce tour
         return money_treasures() + ts["coins_bonus"] - ts["coins_spent"]
 
-    print(f"[play] game={game_id} state_before: actions={ts['actions']} buys={ts['buys']} "
-          f"bonus={ts['coins_bonus']} spent={ts['coins_spent']} "
-          f"hand={{Cu:{hq(CardName.COPPER)}, Si:{hq(CardName.SILVER)}, Go:{hq(CardName.GOLD)}, "
-          f"Vi:{hq(CardName.VILLAGE)}, Sm:{hq(CardName.SMITHY)}, Ma:{hq(CardName.MARKET)}, Fe:{hq(CardName.FESTIVAL)}}} "
-          f"stock_Prov={stock.get(CardName.PROVINCE,0)}")
+    # basic info
+    prov_left = stock.get(CardName.PROVINCE, 0)
+    my_score = getattr(me, "score", 0) or 0
+    max_opponent_score = max((getattr(p, "score", 0) or 0) for p in game.players if p is not me) if game.players else 0
 
-    # ---- PHASE ACTION ----
+    # quick deck_estimate from visible hand (cheap heuristic)
+    # count actions and treasure density in hand to guess engine readiness
+    actions_in_hand = sum(1 for c in hand if c not in (CardName.COPPER, CardName.SILVER, CardName.GOLD,
+                                                       CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE, CardName.CURSE) and hand[c] > 0)
+    treasure_value = money_treasures()
+
+    print(f"[play] game={game_id} start | actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']} spent={ts['coins_spent']} "
+          f"treasure={treasure_value} actions_in_hand={actions_in_hand} prov_left={prov_left} my_score={my_score} max_opp={max_opponent_score}")
+
+    # --------------------
+    # PHASE ACTION (only if actions > 0)
+    # --------------------
     if ts["actions"] > 0:
+        # priority tuned for engine-first but allow attacking (WITCH) after +actions
         action_priority = [
-    CardName.VILLAGE,
-    CardName.FESTIVAL,
-    CardName.MARKET,
-    CardName.LABORATORY,
-    CardName.WITCH,      # ⬅️ on lance l’attaque après avoir sécurisé les +Actions
-    CardName.SMITHY,
-    CardName.WOODCUTTER,
-]
-
+            CardName.VILLAGE, CardName.FESTIVAL, CardName.MARKET,
+            CardName.LABORATORY, CardName.WITCH, CardName.SMITHY, CardName.WOODCUTTER
+        ]
         for a in action_priority:
             if hq(a) > 0 and a.name in EFFECTS:
                 acts, buys, coins, _ = EFFECTS[a.name]
                 ts["actions"] -= 1
                 ts["actions"] += acts
-                ts["buys"]    += buys
+                ts["buys"] += buys
                 ts["coins_bonus"] += coins
-                print(f"[play] ACTION {a.name} | +acts={acts} +buys={buys} +$bonus={coins} "
-                      f"-> actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}")
+                print(f"[play] ACTION {a.name} applied -> +acts={acts} +buys={buys} +$={coins} => actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}")
                 return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
 
-    # ---- PHASE ACHAT ----
-    if ts["buys"] > 0:
-        avail = money_available()
-        print(f"[play] BUY phase | money_treasures={money_treasures()} bonus={ts['coins_bonus']} "
-              f"spent={ts['coins_spent']} -> available={avail}")
+    # --------------------
+    # Decide mode: engine-first or aggressive Duchy-steal
+    # --------------------
+    aggressive_mode = False
+    if prov_left <= PROV_THRESHOLD:
+        aggressive_mode = True
+    if (max_opponent_score - my_score) >= SCORE_DELTA:
+        aggressive_mode = True
 
-        def try_buy(card: CardName) -> DopynionResponseStr | None:
+    # also consider buying Duchy opportunistically if we have many buys and medium money
+    # engine condition: do we realistically have enough output to buy provinces reliably?
+    engine_ready = (money_available() >= ENGINE_PROVINCE_MONEY) or (treasure_value + ts["coins_bonus"] >= 8 and ts["buys"] >= 1)
+
+    print(f"[play] mode decision -> aggressive={aggressive_mode} engine_ready={engine_ready} money_avail={money_available()}")
+
+    # --------------------
+    # PHASE BUY (adaptive)
+    # --------------------
+    if ts["buys"] > 0:
+        avail_before = money_available()
+        print(f"[play] BUY phase -> available={avail_before} buys={ts['buys']} prov_left={prov_left}")
+
+        def can_buy(card: CardName) -> bool:
+            return ts["buys"] > 0 and in_stock(card) and money_available() >= COST.get(card, 9999)
+
+        def do_buy(card: CardName) -> DopynionResponseStr:
             cost = COST[card]
-            if ts["buys"] <= 0:
-                return None
-            if not in_stock(card):
-                return None
-            if avail < cost:
-                return None
-            # OK : on achète
             ts["buys"] -= 1
             ts["coins_spent"] += cost
-            print(f"[play] BUY {card.name} (cost={cost}) -> buys={ts['buys']} spent={ts['coins_spent']} "
-                  f"available_now={money_available()}")
+            print(f"[play] BUY {card.name} (cost={cost}) -> buys_left={ts['buys']} spent={ts['coins_spent']} avail_now={money_available()}")
             return DopynionResponseStr(game_id=game_id, decision=f"BUY {card.name}")
 
-        # 1) Province si possible
-        r = try_buy(CardName.PROVINCE)
-        if r: return r
+        # 1) If engine ready strongly -> prioritize Province(s)
+        if engine_ready and can_buy(CardName.PROVINCE):
+            return do_buy(CardName.PROVINCE)
 
-        # 2) Gold si possible
-        r = try_buy(CardName.GOLD)
-        if r: return r
-        print(f"[play] WITCH available? stock_curse={stock.get(CardName.CURSE,0)} in_stock_witch={in_stock(CardName.WITCH)}")
-        # 3) Palier 5$ : Market / Festival / Witch (si Curse dispo) puis Duchy
-        five_cost_candidates = [CardName.MARKET, CardName.FESTIVAL]
-        # Witch prioritaire si la pile Malédiction n'est pas vide
-        if stock.get(CardName.CURSE, 0) > 0:
-            five_cost_candidates.append(CardName.WITCH)
-        five_cost_candidates.append(CardName.DUCHY)
+        # 2) Aggressive mode: try Duchy early to deny points
+        if aggressive_mode:
+            if can_buy(CardName.DUCHY):
+                return do_buy(CardName.DUCHY)
+            # if cannot buy Duchy, still consider Province if possible
+            if can_buy(CardName.PROVINCE):
+                return do_buy(CardName.PROVINCE)
 
-        for cand in five_cost_candidates:
-            r = try_buy(cand)
-            if r: return r
+        # 3) Normal engine build: aim to get motor pieces (Market/Festival/Woodcutter), then Gold, then Smithy
+        # Prioritize Market (best all-around), Festival (speed), Woodcutter (cheap +buy)
+        for cand in (CardName.MARKET, CardName.FESTIVAL, CardName.WOODCUTTER):
+            # buy Market/Festival/Woodcutter only if it helps immediate or near-future buys:
+            # e.g., if money_available >= COST OR we have actions to play them later
+            if can_buy(cand):
+                # small safeguard: don't buy infinite Markets if we already have many buy bonus this turn
+                return do_buy(cand)
 
-        # 4) Smithy à 4$
-        r = try_buy(CardName.SMITHY)
-        if r: return r
+        # 4) If we have moderate available and want to secure score: buy Gold then Province/Duchy opportunistically
+        if can_buy(CardName.GOLD):
+            return do_buy(CardName.GOLD)
 
-        # 5) 3$ : Silver puis Village
+        # if we got >=1 buys and still can pick duchy opportunistically (e.g., after previous buys in same turn)
+        if ts["buys"] >= 1 and can_buy(CardName.DUCHY):
+            return do_buy(CardName.DUCHY)
+
+        # 5) Smithy to draw into more treasure next calls
+        if can_buy(CardName.SMITHY):
+            return do_buy(CardName.SMITHY)
+
+        # 6) fallback economy: Silver or Village
         for cand in (CardName.SILVER, CardName.VILLAGE):
-            r = try_buy(cand)
-            if r: return r
+            if can_buy(cand):
+                return do_buy(cand)
 
-        # 6) 2$ : Estate en dernier recours
-        r = try_buy(CardName.ESTATE)
-        if r: return r
+        # 7) last resort: Estate
+        if can_buy(CardName.ESTATE):
+            return do_buy(CardName.ESTATE)
 
-    print(f"[play] nothing to do -> END_TURN | final_state: actions={ts['actions']} buys={ts['buys']} "
-          f"bonus={ts['coins_bonus']} spent={ts['coins_spent']}")
+    # nothing else -> end turn
+    print(f"[play] nothing to do -> END_TURN | final state actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']} spent={ts['coins_spent']}")
     return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+
 
 
 
