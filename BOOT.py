@@ -135,6 +135,14 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     nb_copper = hand.get(CardName.COPPER, 0)
     nb_silver = hand.get(CardName.SILVER, 0)
     nb_gold = hand.get(CardName.GOLD, 0)
+    money = nb_copper * 1 + nb_silver * 2 + nb_gold * 3
+    # Priorité : Province > Duchy > Estate (si stock et argent suffisant)
+    if money >= 8 and stock.get(CardName.PROVINCE, 0) > 0:
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
+    if money >= 5 and stock.get(CardName.DUCHY, 0) > 0 and stock.get(CardName.PROVINCE, 0) == 0:
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.DUCHY.value}")
+    if money >= 2 and stock.get(CardName.ESTATE, 0) > 0 and stock.get(CardName.PROVINCE, 0) == 0 and stock.get(CardName.DUCHY, 0) == 0:
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.ESTATE.value}")
     # Cas spécial : 1 gold, 2 silver, 1 copper (et assez pour Province)
     if nb_gold == 1 and nb_silver == 2 and nb_copper == 1 and stock.get(CardName.PROVINCE, 0) > 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
@@ -144,10 +152,6 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     # Conversion Silver -> Gold
     if nb_silver == 3 and stock.get(CardName.GOLD, 0) > 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.GOLD.value}")
-    # Province si possible
-    money = nb_copper * 1 + nb_silver * 2 + nb_gold * 3
-    if money >= 8 and stock.get(CardName.PROVINCE, 0) > 0:
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
     # Actions puissantes (jamais Curse)
     for card in [CardName.WITCH, CardName.COUNCILROOM, CardName.DISTANTSHORE, CardName.FARMINGVILLAGE]:
         if stock.get(card, 0) > 0:
