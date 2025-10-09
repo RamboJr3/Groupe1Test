@@ -116,7 +116,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         return DopynionResponseStr(game_id=game_id, decision="END_TURN")
     hand = me.hand.quantities
     stock = game.stock.quantities
-    # 2. Phase d'action (priorité Witch pour donner Curse, puis autres actions)
+    # 2. Phase d'action : joue la première action dispo selon priorité
     action_priority = [
         CardName.WITCH, CardName.VILLAGE, CardName.FESTIVAL, CardName.SMITHY,
         CardName.COUNCILROOM, CardName.DISTANTSHORE, CardName.FARMINGVILLAGE
@@ -124,19 +124,34 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     for card in action_priority:
         if hand.get(card, 0) > 0:
             return DopynionResponseStr(game_id=game_id, decision=f"ACTION {card.value}")
-    # Sinon, joue n'importe quelle autre action (hors cartes non-action et malédiction)
+    # Sinon, joue n'importe quelle autre action (hors trésors et victoires)
     for card, qty in hand.items():
         if qty > 0 and card not in [
             CardName.COPPER, CardName.SILVER, CardName.GOLD,
             CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE, CardName.CURSE
         ]:
             return DopynionResponseStr(game_id=game_id, decision=f"ACTION {card.value}")
-    # PHASE D'ACHAT MINIMALE POUR DEBUG : 3 Copper => Silver, sinon END_TURN
+    # 3. Phase d'achat inspirée de strategy.py/policy.py
     nb_copper = hand.get(CardName.COPPER, 0)
-    if nb_copper == 3 and stock.get(CardName.SILVER, 0) > 0:
-        print("[DEBUG] Achat: Silver (conversion 3 Copper)")
+    nb_silver = hand.get(CardName.SILVER, 0)
+    nb_gold = hand.get(CardName.GOLD, 0)
+    money = nb_copper * 1 + nb_silver * 2 + nb_gold * 3
+    # Province
+    if money >= 8 and stock.get(CardName.PROVINCE, 0) > 0:
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
+    # Gold
+    if money >= 6 and stock.get(CardName.GOLD, 0) > 0:
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.GOLD.value}")
+    # Silver (conversion 3 Copper ou si possible)
+    if money >= 3 and stock.get(CardName.SILVER, 0) > 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.SILVER.value}")
-    print("[DEBUG] Aucun achat possible, END_TURN")
+    # Duchy
+    if money >= 5 and stock.get(CardName.DUCHY, 0) > 0:
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.DUCHY.value}")
+    # Estate
+    if money >= 2 and stock.get(CardName.ESTATE, 0) > 0:
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.ESTATE.value}")
+    # Sinon, END_TURN
     return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
 
