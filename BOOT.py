@@ -131,26 +131,28 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE, CardName.CURSE
         ]:
             return DopynionResponseStr(game_id=game_id, decision=f"ACTION {card.value}")
-    # 3. Phase d'achat (jamais Curse, alternance Province/Witch)
+    # 3. Phase d'achat (jamais Curse, Province > Witch, Duchy/Estate seulement si Province épuisée)
     nb_copper = hand.get(CardName.COPPER, 0)
     nb_silver = hand.get(CardName.SILVER, 0)
     nb_gold = hand.get(CardName.GOLD, 0)
     nb_witch = me.deck.quantities.get(CardName.WITCH, 0) if hasattr(me, 'deck') and me.deck and me.deck.quantities else 0
     money = nb_copper * 1 + nb_silver * 2 + nb_gold * 3
-    # Priorité : Province > Witch (si on en a moins que 2 ou moins que Provinces restantes) > Duchy > Estate
-    if money >= 8 and stock.get(CardName.PROVINCE, 0) > 0:
+    provinces_left = stock.get(CardName.PROVINCE, 0)
+    # Priorité : Province > Witch (si on en a moins que 2 ou moins que Provinces restantes)
+    if money >= 8 and provinces_left > 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
     # Acheter Witch si on en a moins que 2 ou moins que Provinces restantes
     if money >= 5 and stock.get(CardName.WITCH, 0) > 0:
-        provinces_left = stock.get(CardName.PROVINCE, 0)
         if nb_witch < 2 or nb_witch < provinces_left:
             return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.WITCH.value}")
-    if money >= 5 and stock.get(CardName.DUCHY, 0) > 0 and stock.get(CardName.PROVINCE, 0) == 0:
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.DUCHY.value}")
-    if money >= 2 and stock.get(CardName.ESTATE, 0) > 0 and stock.get(CardName.PROVINCE, 0) == 0 and stock.get(CardName.DUCHY, 0) == 0:
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.ESTATE.value}")
+    # Duchy/Estate seulement si Province épuisée
+    if provinces_left == 0:
+        if money >= 5 and stock.get(CardName.DUCHY, 0) > 0:
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.DUCHY.value}")
+        if money >= 2 and stock.get(CardName.ESTATE, 0) > 0 and stock.get(CardName.DUCHY, 0) == 0:
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.ESTATE.value}")
     # Cas spécial : 1 gold, 2 silver, 1 copper (et assez pour Province)
-    if nb_gold == 1 and nb_silver == 2 and nb_copper == 1 and stock.get(CardName.PROVINCE, 0) > 0:
+    if nb_gold == 1 and nb_silver == 2 and nb_copper == 1 and provinces_left > 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
     # Conversion Copper -> Silver
     if nb_copper == 3 and stock.get(CardName.SILVER, 0) > 0:
@@ -185,6 +187,10 @@ async def discard_card_from_hand(
     game_id: GameIdDependency,
     decision_input: Hand,
 ) -> DopynionResponseCardName:
+    # Si une Province est en main, la défausser en priorité
+    if CardName.PROVINCE in decision_input.hand:
+        return DopynionResponseCardName(game_id=game_id, decision=CardName.PROVINCE)
+    # Sinon, défausser la première carte
     return DopynionResponseCardName(game_id=game_id, decision=decision_input.hand[0])
 
 
