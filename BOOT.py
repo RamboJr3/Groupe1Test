@@ -116,10 +116,10 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         return DopynionResponseStr(game_id=game_id, decision="END_TURN")
     hand = me.hand.quantities
     stock = game.stock.quantities
-    # 2. Phase d'action (ajout des nouvelles cartes)
+    # 2. Phase d'action (priorité Witch pour donner Curse, puis autres actions)
     action_priority = [
-        CardName.VILLAGE, CardName.FESTIVAL, CardName.SMITHY,
-        CardName.WITCH, CardName.COUNCILROOM, CardName.DISTANTSHORE, CardName.FARMINGVILLAGE
+        CardName.WITCH, CardName.VILLAGE, CardName.FESTIVAL, CardName.SMITHY,
+        CardName.COUNCILROOM, CardName.DISTANTSHORE, CardName.FARMINGVILLAGE
     ]
     for card in action_priority:
         if hand.get(card, 0) > 0:
@@ -131,14 +131,20 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE, CardName.CURSE
         ]:
             return DopynionResponseStr(game_id=game_id, decision=f"ACTION {card.value}")
-    # 3. Phase d'achat (jamais Curse)
+    # 3. Phase d'achat (jamais Curse, alternance Province/Witch)
     nb_copper = hand.get(CardName.COPPER, 0)
     nb_silver = hand.get(CardName.SILVER, 0)
     nb_gold = hand.get(CardName.GOLD, 0)
+    nb_witch = me.deck.quantities.get(CardName.WITCH, 0) if hasattr(me, 'deck') and me.deck and me.deck.quantities else 0
     money = nb_copper * 1 + nb_silver * 2 + nb_gold * 3
-    # Priorité : Province > Duchy > Estate (si stock et argent suffisant)
+    # Priorité : Province > Witch (si on en a moins que 2 ou moins que Provinces restantes) > Duchy > Estate
     if money >= 8 and stock.get(CardName.PROVINCE, 0) > 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.PROVINCE.value}")
+    # Acheter Witch si on en a moins que 2 ou moins que Provinces restantes
+    if money >= 5 and stock.get(CardName.WITCH, 0) > 0:
+        provinces_left = stock.get(CardName.PROVINCE, 0)
+        if nb_witch < 2 or nb_witch < provinces_left:
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.WITCH.value}")
     if money >= 5 and stock.get(CardName.DUCHY, 0) > 0 and stock.get(CardName.PROVINCE, 0) == 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.DUCHY.value}")
     if money >= 2 and stock.get(CardName.ESTATE, 0) > 0 and stock.get(CardName.PROVINCE, 0) == 0 and stock.get(CardName.DUCHY, 0) == 0:
@@ -152,8 +158,8 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     # Conversion Silver -> Gold
     if nb_silver == 3 and stock.get(CardName.GOLD, 0) > 0:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {CardName.GOLD.value}")
-    # Actions puissantes (jamais Curse)
-    for card in [CardName.WITCH, CardName.COUNCILROOM, CardName.DISTANTSHORE, CardName.FARMINGVILLAGE]:
+    # Actions puissantes (jamais Curse, Witch déjà gérée)
+    for card in [CardName.COUNCILROOM, CardName.DISTANTSHORE, CardName.FARMINGVILLAGE]:
         if stock.get(card, 0) > 0:
             return DopynionResponseStr(game_id=game_id, decision=f"BUY {card.value}")
     # Jamais acheter Curse
