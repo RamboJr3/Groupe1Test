@@ -1,43 +1,75 @@
 import html
+import threading
 from pathlib import Path
 from typing import Annotated
+from contextlib import contextmanager
 
-from dopynion.data_model import (
-    CardName,
-    CardNameAndHand,
-    Game,
-    Hand,
-    MoneyCardsInHand,
-    PossibleCards,
-)
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
+from dopynion.data_model import (
+    CardName, CardNameAndHand, Game, Hand, MoneyCardsInHand, PossibleCards,
+)
+
 app = FastAPI()
 
-# --- ÉTAT DE TOUR ---
-SESS: dict[str, dict] = {}   # { game_id: {"actions": int, "buys": int, "coins_bonus": int, "coins_spent": int} }
+# === ÉTAT GLOBAL PAR PARTIE ===
+MASTER_LOCK = threading.RLock()                 # protège la création des locks/sessions
+SESS: dict[str, dict] = {}                      # { game_id: { actions, buys, coins_bonus, coins_spent, owned{}, turn, draw_bonus } }
+SESS_LOCKS: dict[str, threading.RLock] = {}     # un verrou par game_id
+
+def _lock_for(game_id: str) -> threading.RLock:
+    with MASTER_LOCK:
+        lock = SESS_LOCKS.get(game_id)
+        if lock is None:
+            lock = threading.RLock()
+            SESS_LOCKS[game_id] = lock
+        return lock
+
+@contextmanager
+def with_game_lock(game_id: str):
+    lock = _lock_for(game_id)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+
+def _sess(game_id: str) -> dict:
+    # doit être appelé sous with_game_lock OU sous MASTER_LOCK
+    if game_id not in SESS:
+        SESS[game_id] = {
+            "actions": 1, "buys": 1, "coins_bonus": 0, "coins_spent": 0,
+            "owned": {}, "turn": 0, "draw_bonus": 0
+        }
+    return SESS[game_id]
 
 def init_turn_state(game_id: str) -> None:
-    SESS.setdefault(game_id, {"owned": {}, "turn": 0})
-    SESS[game_id].update({"actions": 1, "buys": 1, "coins_bonus": 0, "coins_spent": 0})
+    with with_game_lock(game_id):
+        s = _sess(game_id)
+        s["actions"] = 1
+        s["buys"] = 1
+        s["coins_bonus"] = 0
+        s["coins_spent"] = 0
+        # on NE reset PAS owned/turn/draw_bonus ici
 
+def get_turn_state_readonly(game_id: str) -> dict:
+    # lecture sans modifier
+    with with_game_lock(game_id):
+        return _sess(game_id).copy()
 
-def get_turn_state(game_id: str) -> dict:
-    return SESS.setdefault(game_id, {"actions": 1, "buys": 1, "coins_bonus": 0, "coins_spent": 0})
-
-# --- suivi du deck par partie (approx via achats) ---
-# SESS[game_id] = {"actions":..., "buys":..., "coins_bonus":..., "coins_spent":..., "owned": {CardName: int}}
 def inc_owned(game_id: str, card: CardName) -> None:
-    s = SESS.setdefault(game_id, {"actions":1,"buys":1,"coins_bonus":0,"coins_spent":0,"owned":{}})
-    s.setdefault("owned", {})
-    s["owned"][card] = s["owned"].get(card, 0) + 1
+    with with_game_lock(game_id):
+        s = _sess(game_id)
+        o = s.setdefault("owned", {})
+        o[card] = o.get(card, 0) + 1
 
 def owned(game_id: str, card: CardName) -> int:
-    s = SESS.get(game_id) or {}
-    o = s.get("owned") or {}
-    return o.get(card, 0)
+    with with_game_lock(game_id):
+        s = _sess(game_id)
+        return s.get("owned", {}).get(card, 0)
+
 
 
 # --- COÛTS MINIMAUX UTILISÉS (cartes jouables aujourd'hui) ---
@@ -160,13 +192,18 @@ def start_game(game_id: GameIdDependency) -> DopynionResponseStr:
 
 @app.get("/start_turn")
 def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
-    init_turn_state(game_id)
-    # compteur de tour
-    s = SESS.setdefault(game_id, {"owned": {}})
-    s["turn"] = s.get("turn", 0) + 1
-    # info utile: HIRELINGs possédées
-    rec_cnt = (s.get("owned") or {}).get(CardName.HIRELING, 0)
-    print(f"[start_turn] game={game_id} turn={s['turn']} recrues_owned={rec_cnt}")
+    with with_game_lock(game_id):
+        s = _sess(game_id)
+        # reset état de tour
+        s["actions"] = 1
+        s["buys"] = 1
+        s["coins_bonus"] = 0
+        s["coins_spent"] = 0
+        # compteur de tour
+        s["turn"] = s.get("turn", 0) + 1
+        # bonus de pioche persistant = nb de Hirelings joués (approx: possédés)
+        s["draw_bonus"] = s.get("owned", {}).get(CardName.HIRELING, 0)
+        print(f"[start_turn] game={game_id} turn={s['turn']} hirelings={s['draw_bonus']}")
     return DopynionResponseStr(game_id=game_id, decision="OK")
 
 
@@ -187,7 +224,12 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
 
     hand = me.hand.quantities        # dict[CardName,int]
     stock = game.stock.quantities    # dict[CardName,int]
-    ts = get_turn_state(game_id)
+    # l'état doit être lu/modifié sous verrou
+    with with_game_lock(game_id):
+        ts = _sess(game_id)
+        # on peut juste tracer ici si tu veux
+        print(f"[play] state at entry: acts={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']} spent={ts['coins_spent']}")
+
 
     # helpers
     def hq(c: CardName) -> int: return hand.get(c, 0)
@@ -212,33 +254,33 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
           f"treasure={treasure_value} actions_in_hand={actions_in_hand} prov_left={prov_left} my_score={my_score} max_opp={max_opponent_score}")
 
     # --------------------
-    # PHASE ACTION (only if actions > 0)
+    # PHASE ACTION (sous verrou)
     # --------------------
-    if ts["actions"] > 0:
-        # priority tuned for engine-first but allow attacking (WITCH) after +actions
-        action_priority = [
-    CardName.MARKET,     # +1 carte, +1 action, +1 buy, +1$
-    CardName.LABORATORY, # +2 cartes, +1 action
-    CardName.VILLAGE,    # +2 actions, +1 carte
-    CardName.FESTIVAL,   # +2 actions, +1 buy, +2$
-    CardName.HIRELING,     # terminal; on veut l'armer tôt une fois qu'on a des +actions
-    CardName.WITCH,      # terminal
-    CardName.SMITHY,     # terminal
-    CardName.WOODCUTTER, # terminal
-]
+    action_priority = [
+        CardName.MARKET,      # +1 carte, +1 action, +1 buy, +1$
+        CardName.LABORATORY,  # +2 cartes, +1 action
+        CardName.VILLAGE,     # +2 actions, +1 carte
+        CardName.FESTIVAL,    # +2 actions, +1 buy, +2$
+        CardName.HIRELING,    # terminal (durée)
+        CardName.WITCH,       # terminal
+        CardName.SMITHY,      # terminal
+        CardName.WOODCUTTER,  # terminal
+    ]
 
-
-
-
-        for a in action_priority:
-            if hq(a) > 0 and a.name in EFFECTS:
-                acts, buys, coins, _ = EFFECTS[a.name]
+    for a in action_priority:
+        if hq(a) > 0 and a.name in EFFECTS:
+            acts, buys, coins, _ = EFFECTS[a.name]
+            with with_game_lock(game_id):
+                ts = _sess(game_id)
+                if ts["actions"] <= 0:
+                    break
                 ts["actions"] -= 1
                 ts["actions"] += acts
-                ts["buys"] += buys
+                ts["buys"]    += buys
                 ts["coins_bonus"] += coins
-                print(f"[play] ACTION {a.name} applied -> +acts={acts} +buys={buys} +$={coins} => actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}")
-                return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
+            print(f"[play] ACTION {a.name} -> +acts={acts} +buys={buys} +$={coins} | "
+                f"state actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}")
+            return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
 
     # --------------------
     # Decide mode: engine-first or aggressive Duchy-steal
@@ -270,21 +312,32 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     print(f"[play] mode decision -> aggressive={aggressive_mode} engine_ready={engine_ready} money_avail={money_available()}")
 
     # --------------------
-    # PHASE ACHAT — (REMPLACER TOUT CE BLOC)
+    # PHASE ACHAT — helpers thread-safe
     # --------------------
     def can_buy(c: CardName) -> bool:
-        return ts["buys"] > 0 and stock.get(c, 0) and money_available() >= COST[c]
+        # Lecture figée de l'état sous verrou
+        with with_game_lock(game_id):
+            ts_local = _sess(game_id).copy()
+        return ts_local["buys"] > 0 and stock.get(c, 0) and \
+            (hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3
+                + ts_local["coins_bonus"] - ts_local["coins_spent"]) >= COST[c]
 
     def do_buy(c: CardName) -> DopynionResponseStr:
         cost = COST[c]
-        ts["buys"] -= 1
-        ts["coins_spent"] += cost
-        inc_owned(game_id, c)
-        print(f"[buy] BUY {c.name} cost={cost} -> buys_left={ts['buys']} spent={ts['coins_spent']} avail_now={money_available()}")
+        with with_game_lock(game_id):
+            ts2 = _sess(game_id)
+            if ts2["buys"] <= 0 or ts2["coins_spent"] + cost > \
+            (hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3 + ts2["coins_bonus"]):
+                raise HTTPException(status_code=409, detail="Concurrent state changed: cannot buy now")
+            ts2["buys"] -= 1
+            ts2["coins_spent"] += cost
+        inc_owned(game_id, c)   # déjà sous verrou dans l'implémentation
+        print(f"[buy] BUY {c.name} cost={cost}")
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
 
-    if ts["buys"] > 0:
-        turn_no = SESS[game_id].get("turn", 1)
+    if True:  # on n'utilise plus 'if ts["buys"] > 0' sans verrou
+        with with_game_lock(game_id):
+            turn_no = _sess(game_id).get("turn", 1)
         enemy_alive = any("equipe3" in (getattr(p, "name", "") or "").lower() for p in game.players)
 
         vg_cnt  = owned(game_id, CardName.VILLAGE)
@@ -300,10 +353,9 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         villages_left = stock.get(CardName.VILLAGE, 0) if CardName.VILLAGE in stock else 0
         AGGRO_DUCHY   = (prov_left <= 4) or ((max_opponent_score - my_score) >= 4)
 
-        print(f"[buy] t={turn_no} $={money_available()} prov={prov_left} curses={curses_left} "
-            f"owned: RC={rc_cnt} VG={vg_cnt} MK={mk_cnt} LAB={lab_cnt} WT={wt_cnt} SM={sm_cnt} GOLD={gd_cnt} "
-            f"villages_left={villages_left} aggro_duchy={AGGRO_DUCHY} enemy_alive={enemy_alive}")
-
+        print(f"[buy] t={turn_no} prov={prov_left} curses={curses_left} "
+            f"owned RC={rc_cnt} VG={vg_cnt} MK={mk_cnt} LAB={lab_cnt} WT={wt_cnt} SM={sm_cnt} GOLD={gd_cnt} "
+            f"villages_left={villages_left} enemy_alive={enemy_alive}")
         # ===== 0) Province si possible (toujours)
         if can_buy(CardName.PROVINCE):
             return do_buy(CardName.PROVINCE)
@@ -406,7 +458,9 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
 
 @app.get("/end_game")
 def end_game(game_id: GameIdDependency) -> DopynionResponseStr:
-    SESS.pop(game_id, None)
+    with MASTER_LOCK:
+        SESS.pop(game_id, None)
+        SESS_LOCKS.pop(game_id, None)
     return DopynionResponseStr(game_id=game_id, decision="OK")
 
 
