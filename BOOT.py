@@ -367,6 +367,8 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     ch_cnt  = owned(game_id, getattr(CardName, "CHANCELLOR", CardName.ESTATE))
     mi_cnt  = owned(game_id, getattr(CardName, "MILITIA", CardName.ESTATE))
     fest_cnt = owned(game_id, CardName.FESTIVAL) if CardName.FESTIVAL in COST else 0
+    ga_cnt  = owned(game_id, getattr(CardName, "GARDENS", CardName.ESTATE))
+
 
 
     print(f"[mode] t={turn_no} lead={score_lead} ahead={is_ahead} behind={is_behind} "
@@ -489,11 +491,37 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             return do_buy(CardName.MARKET)
         if lab_cnt < 2 and can_buy(CardName.LABORATORY):
             return do_buy(CardName.LABORATORY)
+        
+    # --- Friction quand on est derrière (avant S6) ---
+    # (Optionnel mais conseillé) éviter d’empiler des terminaux sans +Actions :
+    plus_actions = vg_cnt + fest_cnt + mk_cnt   # Village/Festival/Market
+    if is_behind and hasattr(CardName, "MILITIA") and mi_cnt < 1 and plus_actions >= 1 and can_buy(CardName.MILITIA):
+        return do_buy(CardName.MILITIA)
+
+    if is_behind and bd_cnt < 1 and can_buy(getattr(CardName, "BANDIT", CardName.GOLD)):
+        return do_buy(getattr(CardName, "BANDIT", CardName.GOLD))
 
 
-    # S6: Late-Gardens Counter (si derrière ET online)
-    if (my_score < max_opponent_score) and gardens_left and deck_sz >= 20 and can_buy(CardName.GARDENS):
-        return do_buy(CardName.GARDENS)
+
+    # S6: Late-Gardens Counter (nerf spam & choix VP)
+    # - Seulement si on est derrière
+    # - Deck "online" à 30+ cartes (Garden ≈ 3 VP mini)
+    # - Pas en fin de course Provinces
+    # - Cap dynamique: <= min(6, deck_sz//10)
+    gardens_value = deck_sz // 10           # VP par Garden (approx Dominion)
+    GARDENS_CAP   = min(6, gardens_value)   # ex: 30→3, 40→4, max 6
+
+    if is_behind and gardens_left > 0 and deck_sz >= 30 and prov_left >= 5 and ga_cnt < GARDENS_CAP:
+        # Ne pas prendre Garden si on peut finir/avancer aux Provinces
+        if not can_buy(CardName.PROVINCE):
+            # Duchy = 3 VP pour 5 — Garden ne vaut le coup que si >= 3-4 VP
+            if can_buy(CardName.DUCHY):
+                if gardens_value >= 4 and can_buy(CardName.GARDENS):
+                    return do_buy(CardName.GARDENS)
+            else:
+                if gardens_value >= 3 and can_buy(CardName.GARDENS):
+                    return do_buy(CardName.GARDENS)
+
 
     # S7: Safe BM fallback & endgame
     if prov_left <= 4 and can_buy(CardName.PROVINCE):
