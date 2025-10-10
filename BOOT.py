@@ -92,6 +92,7 @@ COST = {
     CardName.BUREAUCRAT: 4,
     CardName.CHANCELLOR: 3,
     CardName.GARDENS: 4,
+    CardName.MILITIA: 4,
 }
 
 
@@ -108,6 +109,7 @@ EFFECTS: dict[str, tuple[int, int, int, int]] = {
     "BANDIT":      (0, 0, 0, 0),  # gain d'Or + attaque gérés par l’arbitre, terminal
     "BUREAUCRAT":  (0, 0, 0, 0),  # gagne Argent au-dessus du deck + attaque, terminal
     "CHANCELLOR":  (0, 0, 2, 0),  # +2 pièces, option de défausser le deck
+    "MILITIA" : (0, 0, 2, 0),
     # GARDENS n’a pas d’effet en jeu (carte Victoire)
 }
 
@@ -283,16 +285,26 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     # --------------------
     # PHASE ACTION (thread-safe, on ne touche pas aux helpers hq(), money_available(), etc.)
     # --------------------
+    militia_card = getattr(CardName, "MILITIA", None)
+        # ordre des terminaux selon le contexte
+    # - s'il reste des Curses -> Witch d'abord (priorité à la malédiction)
+    # - sinon -> Militia d'abord (hand-size attack "cancer")
+    if militia_card:
+        if curses_left and curses_left > 0:
+            terminal_order = [CardName.WITCH, militia_card, CardName.SMITHY]
+        else:
+            terminal_order = [militia_card, CardName.WITCH, CardName.SMITHY]
+    else:
+        terminal_order = [CardName.WITCH, CardName.SMITHY]
     action_priority = [
-        # engine d'abord pour que les Sorcières connectent
-        CardName.MARKET,      # +1 carte, +1 action, +1 buy, +$1
-        CardName.LABORATORY,  # +2 cartes, +1 action
-        CardName.VILLAGE,     # +2 actions, +1 carte
-        CardName.FESTIVAL,    # +2 actions, +1 buy, +$2
-        # terminaux ensuite
-        CardName.WITCH,       # attaque + pioche
-        CardName.SMITHY,      # pioche
-        # cartes "nuisibles" / situationnelles (si présentes dans le set)
+        # non-terminaux d'abord (pioche/+actions)
+        CardName.MARKET,
+        CardName.LABORATORY,
+        CardName.VILLAGE,
+        CardName.FESTIVAL,
+        # puis terminaux adaptés
+        *terminal_order,
+        # utilitaires/nuisibles si présents
         getattr(CardName, "BUREAUCRAT", None),
         getattr(CardName, "BANDIT", None),
         getattr(CardName, "CHANCELLOR", None),
@@ -353,6 +365,9 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     bu_cnt  = owned(game_id, getattr(CardName, "BUREAUCRAT", CardName.ESTATE))
     bd_cnt  = owned(game_id, getattr(CardName, "BANDIT", CardName.ESTATE))
     ch_cnt  = owned(game_id, getattr(CardName, "CHANCELLOR", CardName.ESTATE))
+    mi_cnt  = owned(game_id, getattr(CardName, "MILITIA", CardName.ESTATE))
+    fest_cnt = owned(game_id, CardName.FESTIVAL) if CardName.FESTIVAL in COST else 0
+
 
     print(f"[mode] t={turn_no} lead={score_lead} ahead={is_ahead} behind={is_behind} "
         f"prov_left={prov_left} curses_left={curses_left} GARDENS_MODE={bool(GARDENS_MODE)} "
@@ -386,88 +401,125 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
 
     # --------------------
-    # LOGIQUE D'ACHAT (anti-perte, curse d’abord quand on n’est pas devant)
+    # OPPONENT SIGNATURES & MODES
     # --------------------
+    # Piles supplémentaires utilisées pour la détection d'ouverture
+    labs_left      = stock.get(CardName.LABORATORY, 0) if CardName.LABORATORY in stock else 0
+    markets_left   = stock.get(CardName.MARKET, 0) if CardName.MARKET in stock else 0
+    festival_left  = stock.get(CardName.FESTIVAL, 0) if CardName.FESTIVAL in stock else 0
+    gold_left      = stock.get(CardName.GOLD, 0)
+    FULL = 10  # taille standard des piles royaume
 
-    # 0) Province si on green (devant) ou fin de partie
-    if (AGGRO_GREEN or prov_left <= 3) and can_buy(CardName.PROVINCE):
-        return do_buy(CardName.PROVINCE)
+    BIGMONEY_MODE   = (turn_no >= 4 and villages_left >= 8 and labs_left >= 9 and markets_left >= 9 and curses_left == FULL)
+    ENGINE_MODE     = (turn_no <= 8 and (villages_left <= 7 or labs_left <= 8 or markets_left <= 8))
+    WITCH_SPAM_MODE = (turn_no <= 8 and curses_left <= FULL - 10)
+    MILITIA_LOCK    = (festival_left <= 8 and curses_left == FULL)
+    GARDENS_RACE    = (gardens_left > 0 and gardens_left < FULL and turn_no <= 12)
 
-    # 1) RUSH SORCIÈRE TÔT (T ≤ 6) s’il reste des Curses
+    # --------------------
+    # STRATEGY SWITCHBOARD (7 strats)
+    # --------------------
+    # S1: Anti-BigMoney Rush
+    if BIGMONEY_MODE:
+        if can_buy(CardName.PROVINCE) and (prov_left <= 6 or my_score >= max_opponent_score):
+            return do_buy(CardName.PROVINCE)
+        if gd_cnt < 2 and can_buy(CardName.GOLD):
+            return do_buy(CardName.GOLD)
+        # insère ici : 1 Militia tôt
+        if hasattr(CardName, "MILITIA") and mi_cnt < 1 and can_buy(CardName.MILITIA):
+            return do_buy(CardName.MILITIA)
+        if turn_no <= 6 and curses_left == FULL and wt_cnt < 2 and can_buy(CardName.WITCH):
+            return do_buy(CardName.WITCH)
+        if can_buy(CardName.SILVER):
+            return do_buy(CardName.SILVER)
+
+
+    # S2: Engine-Crush (deny Village + Bandit tôt)
+    if ENGINE_MODE:
+        if villages_left > 0 and vg_cnt < 2 and can_buy(CardName.VILLAGE):
+            return do_buy(CardName.VILLAGE)
+        if hasattr(CardName, "MILITIA"):
+            plus_actions = vg_cnt + fest_cnt + mk_cnt  # Market donne +1 action
+            cap_militia = 2 if plus_actions >= 2 else 1
+            if mi_cnt < cap_militia and can_buy(CardName.MILITIA):
+                return do_buy(CardName.MILITIA)
+        if bd_cnt < 1 and can_buy(getattr(CardName, "BANDIT", CardName.GOLD)):
+            return do_buy(getattr(CardName, "BANDIT", CardName.GOLD))
+        if mk_cnt < 2 and can_buy(CardName.MARKET):
+            return do_buy(CardName.MARKET)
+        if lab_cnt < 3 and can_buy(CardName.LABORATORY):
+            return do_buy(CardName.LABORATORY)
+        if gd_cnt < 2 and can_buy(CardName.GOLD):
+            return do_buy(CardName.GOLD)
+        if can_buy(CardName.PROVINCE):
+            return do_buy(CardName.PROVINCE)
+
+
+    # S3: Hybrid Witch->Gold (ouverture générique)
     if turn_no <= 6 and curses_left > 0 and wt_cnt < 2 and can_buy(CardName.WITCH):
         return do_buy(CardName.WITCH)
+    if mk_cnt < 2 and can_buy(CardName.MARKET):
+        return do_buy(CardName.MARKET)
+    if lab_cnt < 2 and can_buy(CardName.LABORATORY):
+        return do_buy(CardName.LABORATORY)
+    if gd_cnt < 2 and can_buy(CardName.GOLD):
+        return do_buy(CardName.GOLD)
 
-    # 2) PRESSION MALÉDICTIONS quand on n’est pas devant (AGGRO_CURSE)
-    if AGGRO_CURSE:
-        # casser le moteur d’Équipe3: deny Village tôt
-        if enemy_equipe3 and villages_left > 0 and vg_cnt < 2 and can_buy(CardName.VILLAGE):
-            return do_buy(CardName.VILLAGE)
+    # S4: Anti Witch-Spam
+    if WITCH_SPAM_MODE:
+        if mk_cnt < 2 and can_buy(CardName.MARKET):
+            return do_buy(CardName.MARKET)
+        if lab_cnt < 3 and can_buy(CardName.LABORATORY):
+            return do_buy(CardName.LABORATORY)
+        if hasattr(CardName, "MILITIA") and mi_cnt < 1 and (vg_cnt + fest_cnt + mk_cnt) >= 1 and can_buy(CardName.MILITIA):
+            return do_buy(CardName.MILITIA)
+        if gd_cnt < 2 and can_buy(CardName.GOLD):
+            return do_buy(CardName.GOLD)
 
-        # encore des Sorcières: jusqu’à 3 si peu de Villages restants, sinon 2
-        cap_witch = 3 if (enemy_equipe3 and villages_left <= 7) else 2
-        if wt_cnt < cap_witch and can_buy(CardName.WITCH):
-            return do_buy(CardName.WITCH)
 
-        # colle de moteur pour enchaîner les Witches
+    # S5: Anti Milice-Lock
+    if MILITIA_LOCK:
+        if 'FESTIVAL' in CardName.__members__ and fest_cnt < 2 and can_buy(CardName.FESTIVAL):
+            return do_buy(CardName.FESTIVAL)
+        if hasattr(CardName, "MILITIA"):
+            cap_militia = 2 if (vg_cnt + fest_cnt + mk_cnt) >= 2 else 1
+            if mi_cnt < cap_militia and can_buy(CardName.MILITIA):
+                return do_buy(CardName.MILITIA)
         if mk_cnt < 2 and can_buy(CardName.MARKET):
             return do_buy(CardName.MARKET)
         if lab_cnt < 2 and can_buy(CardName.LABORATORY):
             return do_buy(CardName.LABORATORY)
 
-        # un Gold pour le payload (cap 1 pendant la phase curse)
-        if gd_cnt < 1 and can_buy(CardName.GOLD):
-            return do_buy(CardName.GOLD)
 
-    # 3) MODE GARDENS (si activé)
-    if GARDENS_MODE:
-        if hasattr(CardName, "GARDENS") and can_buy(CardName.GARDENS):
-            return do_buy(CardName.GARDENS)
-        if mk_cnt < 2 and can_buy(CardName.MARKET):
-            return do_buy(CardName.MARKET)
-        if vg_cnt < 2 and can_buy(CardName.VILLAGE):
-            return do_buy(CardName.VILLAGE)
-        # Chancellor utile pour cycler le deck en slog (cap 1)
-        if hasattr(CardName, "CHANCELLOR") and ch_cnt < 1 and can_buy(CardName.CHANCELLOR):
-            return do_buy(CardName.CHANCELLOR)
+    # S6: Late-Gardens Counter (si derrière ET online)
+    if (my_score < max_opponent_score) and gardens_left and deck_sz >= 20 and can_buy(CardName.GARDENS):
+        return do_buy(CardName.GARDENS)
 
-    # 4) CONSTRUCTION STANDARD (fallback)
-    if mk_cnt < 2 and can_buy(CardName.MARKET):
-        return do_buy(CardName.MARKET)
-    if vg_cnt < 2 and can_buy(CardName.VILLAGE):
-        return do_buy(CardName.VILLAGE)
-    if lab_cnt < 2 and can_buy(CardName.LABORATORY):
-        return do_buy(CardName.LABORATORY)
-
-    # Gold (cap 2) si le payload est faible
+    # S7: Safe BM fallback & endgame
+    if prov_left <= 4 and can_buy(CardName.PROVINCE):
+        return do_buy(CardName.PROVINCE)
     if gd_cnt < 2 and can_buy(CardName.GOLD):
         return do_buy(CardName.GOLD)
-
-    # Sorcière additionnelle seulement s’il reste des Curses et qu’on a des +actions
-    if curses_left > 0 and wt_cnt < 2 and (vg_cnt + mk_cnt + lab_cnt) >= 2 and can_buy(CardName.WITCH):
-        return do_buy(CardName.WITCH)
-
-    # Smithy (cap 2) seulement avec +Actions
-    if sm_cnt < 2 and (vg_cnt + mk_cnt) >= 1 and can_buy(CardName.SMITHY):
-        return do_buy(CardName.SMITHY)
-
-    # 5) GREENING SERRÉ
-    # Jamais Duchy avant la 1ère Province (sauf Gardens mode)
-    if pr_cnt > 0 and (is_ahead or prov_left <= 4 or score_lead >= 6):
-        if can_buy(CardName.DUCHY):
-            return do_buy(CardName.DUCHY)
-
-    # Estate tardif uniquement si très tard et on est devant ou piles basses
-    if turn_no > 12 and (is_ahead or prov_left <= 2) and can_buy(CardName.ESTATE):
-        return do_buy(CardName.ESTATE)
-
-    # 6) CARTES FAIBLE IMPACT (caps stricts)
-    if hasattr(CardName, "BUREAUCRAT") and bu_cnt < 1 and gd_cnt == 0 and can_buy(CardName.BUREAUCRAT):
-        return do_buy(CardName.BUREAUCRAT)
-    if hasattr(CardName, "BANDIT") and bd_cnt < 1 and (mk_cnt + lab_cnt + sm_cnt) >= 2 and can_buy(CardName.BANDIT):
-        return do_buy(CardName.BANDIT)
-    # Chancellor hors Gardens: évité
-
-    # 7) Économie de secours
+    if can_buy(CardName.PROVINCE):
+        return do_buy(CardName.PROVINCE)
+    if prov_left <= 4 and can_buy(CardName.DUCHY):
+        return do_buy(CardName.DUCHY)
+    if can_buy(CardName.SILVER):
+        return do_buy(CardName.SILVER)
+    
+    # pre S7: avant l'argent de secours
+    if hasattr(CardName, "MILITIA") and mi_cnt < 1 and (wt_cnt + sm_cnt + mi_cnt) < 2 and can_buy(CardName.MILITIA):
+        return do_buy(CardName.MILITIA)
+    
+    # S7: Safe BM fallback & endgame
+    if prov_left <= 4 and can_buy(CardName.PROVINCE):
+        return do_buy(CardName.PROVINCE)
+    if gd_cnt < 2 and can_buy(CardName.GOLD):
+        return do_buy(CardName.GOLD)
+    if can_buy(CardName.PROVINCE):
+        return do_buy(CardName.PROVINCE)
+    if prov_left <= 4 and can_buy(CardName.DUCHY):
+        return do_buy(CardName.DUCHY)
     if can_buy(CardName.SILVER):
         return do_buy(CardName.SILVER)
     
