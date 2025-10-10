@@ -88,6 +88,10 @@ COST = {
     CardName.MARKET: 5,
     CardName.WITCH: 5,
     CardName.HIRELING: 6,
+    CardName.BANDIT: 5,
+    CardName.BUREAUCRAT: 4,
+    CardName.CHANCELLOR: 3,
+    CardName.GARDENS: 4,
 }
 
 
@@ -101,6 +105,10 @@ EFFECTS: dict[str, tuple[int, int, int, int]] = {
     "MARKET":     (1, 1, 1, 1),
     "WITCH":      (0, 0, 0, 2),  # ⬅️ +2 cartes ; les Malédictions sont appliquées par l’arbitre
     "HIRELING": (0, 0, 0, 0),  # on la joue, pas d'effet immédiat (le moteur gère le +1 carte/turn)
+    "BANDIT":      (0, 0, 0, 0),  # gain d'Or + attaque gérés par l’arbitre, terminal
+    "BUREAUCRAT":  (0, 0, 0, 0),  # gagne Argent au-dessus du deck + attaque, terminal
+    "CHANCELLOR":  (0, 0, 2, 0),  # +2 pièces, option de défausser le deck
+    # GARDENS n’a pas d’effet en jeu (carte Victoire)
 }
 
 
@@ -252,81 +260,105 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
 
     print(f"[play] game={game_id} start | actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']} spent={ts['coins_spent']} "
           f"treasure={treasure_value} actions_in_hand={actions_in_hand} prov_left={prov_left} my_score={my_score} max_opp={max_opponent_score}")
+        # === DÉRIVÉS / FLAGS POUR LA STRAT ===
+    # lecture sûre de notre deck suivi par SESS
+    with with_game_lock(game_id):
+        deck_sz = sum(_sess(game_id).get("owned", {}).values())
+
+    # piles visibles
+    curses_left   = stock.get(CardName.CURSE, 0) if CardName.CURSE in stock else 0
+    villages_left = stock.get(CardName.VILLAGE, 0) if CardName.VILLAGE in stock else 0
+    gardens_left  = stock.get(CardName.GARDENS, 0) if CardName.GARDENS in stock else 0
+
+    # sommes-nous DEVANT ? (=> mode "cancer" : spam Witch/Bandit/Bureaucrat)
+    AGGRO_CURSE = (my_score >= max_opponent_score)
+
+    # sommes-nous DERRIÈRE ? (=> verdissement agressif Duchy/Province/Gardens)
+    AGGRO_GREEN = (my_score + 3 <= max_opponent_score) or (prov_left <= PROV_THRESHOLD)
+
+    # seuil à partir duquel Gardens commence à bien scorer (≈ 2 PV à 20 cartes)
+    GARDENS_ONLINE = (deck_sz >= 20)
+
 
     # --------------------
-    # PHASE ACTION (sous verrou)
+    # PHASE ACTION (thread-safe & “cancer-aware”)
     # --------------------
-    action_priority = [
-        CardName.MARKET,      # +1 carte, +1 action, +1 buy, +1$
-        CardName.LABORATORY,  # +2 cartes, +1 action
-        CardName.VILLAGE,     # +2 actions, +1 carte
-        CardName.FESTIVAL,    # +2 actions, +1 buy, +2$
-        CardName.HIRELING,    # terminal (durée)
-        CardName.WITCH,       # terminal
-        CardName.SMITHY,      # terminal
-        CardName.WOODCUTTER,  # terminal
-    ]
+    if AGGRO_CURSE:
+        # On mène -> on joue les attaques plus tôt
+        action_priority = [
+            CardName.MARKET,      # +1 carte, +1 action, +1 buy, +1$
+            CardName.LABORATORY,  # +2 cartes, +1 action
+            CardName.VILLAGE,     # +2 actions, +1 carte
+            CardName.FESTIVAL,    # +2 actions, +1 buy, +2$
+            CardName.WITCH,       # terminal (attaque)
+            CardName.BANDIT,      # terminal (attaque trésors)
+            CardName.BUREAUCRAT,  # terminal (attaque victoire)
+            CardName.HIRELING,    # terminal (durée)
+            CardName.SMITHY,      # terminal (pioche)
+            CardName.WOODCUTTER,  # terminal (+buy)
+            CardName.CHANCELLOR,  # terminal (+2$ ; discard deck option)
+        ]
+    else:
+        # On est derrière -> d’abord stabilité/pioche, puis attaques
+        action_priority = [
+            CardName.MARKET,
+            CardName.LABORATORY,
+            CardName.VILLAGE,
+            CardName.FESTIVAL,
+            CardName.HIRELING,
+            CardName.SMITHY,
+            CardName.WITCH,
+            CardName.BANDIT,
+            CardName.BUREAUCRAT,
+            CardName.WOODCUTTER,
+            CardName.CHANCELLOR,
+        ]
 
     for a in action_priority:
         if hq(a) > 0 and a.name in EFFECTS:
             acts, buys, coins, _ = EFFECTS[a.name]
             with with_game_lock(game_id):
-                ts = _sess(game_id)
-                if ts["actions"] <= 0:
+                ts2 = _sess(game_id)
+                if ts2["actions"] <= 0:
                     break
-                ts["actions"] -= 1
-                ts["actions"] += acts
-                ts["buys"]    += buys
-                ts["coins_bonus"] += coins
-            print(f"[play] ACTION {a.name} -> +acts={acts} +buys={buys} +$={coins} | "
-                f"state actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}")
+                ts2["actions"] -= 1
+                ts2["actions"] += acts
+                ts2["buys"]    += buys
+                ts2["coins_bonus"] += coins
+            print(f"[play] ACTION {a.name} -> +acts={acts} +buys={buys} +$={coins}")
             return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
-
-
-    # --------------------
-    # Decide mode: engine-first or aggressive Duchy-steal
-    # --------------------
-    aggressive_mode = False
-    if prov_left <= PROV_THRESHOLD:
-        aggressive_mode = True
-    if (max_opponent_score - my_score) >= SCORE_DELTA:
-        aggressive_mode = True
-
-    # also consider buying Duchy opportunistically if we have many buys and medium money
-    # engine condition: do we realistically have enough output to buy provinces reliably?
-    engine_ready = (money_available() >= ENGINE_PROVINCE_MONEY) or (treasure_value + ts["coins_bonus"] >= 8 and ts["buys"] >= 1)
-
-    print(f"[play] mode decision -> aggressive={aggressive_mode} engine_ready={engine_ready} money_avail={money_available()}")
 
     # --------------------
     # PHASE ACHAT — helpers thread-safe
     # --------------------
     def can_buy(c: CardName) -> bool:
-        # Lecture figée de l'état sous verrou
         with with_game_lock(game_id):
             ts_local = _sess(game_id).copy()
-        return ts_local["buys"] > 0 and stock.get(c, 0) and \
-            (hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3
+        return (
+            ts_local["buys"] > 0
+            and stock.get(c, 0)
+            and (hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3
                 + ts_local["coins_bonus"] - ts_local["coins_spent"]) >= COST[c]
+        )
 
     def do_buy(c: CardName) -> DopynionResponseStr:
         cost = COST[c]
         with with_game_lock(game_id):
             ts2 = _sess(game_id)
-            if ts2["buys"] <= 0 or ts2["coins_spent"] + cost > \
-               (hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3 + ts2["coins_bonus"]):
+            purse = hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3 + ts2["coins_bonus"]
+            if ts2["buys"] <= 0 or ts2["coins_spent"] + cost > purse:
                 raise HTTPException(status_code=409, detail="Concurrent state changed: cannot buy now")
             ts2["buys"] -= 1
             ts2["coins_spent"] += cost
         inc_owned(game_id, c)
-        print(f"[buy] BUY {c.name} cost={cost}")
+        print(f"[buy] BUY {c.name} (${cost})")
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
 
-    # ----- LOGIQUE INVERSEE : si on mène -> sorcières ; si on est derrière -> points -----
+    # --- on drive la logique d’achats ici ---
     with with_game_lock(game_id):
         turn_no = _sess(game_id).get("turn", 1)
 
-    enemy_alive = any("equipe3" in (getattr(p, "name", "") or "").lower() for p in game.players)
+    enemy_alive   = any("equipe3" in (getattr(p, "name", "") or "").lower() for p in game.players)
 
     vg_cnt  = owned(game_id, CardName.VILLAGE)
     mk_cnt  = owned(game_id, CardName.MARKET)
@@ -335,112 +367,107 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     lab_cnt = owned(game_id, CardName.LABORATORY)
     gd_cnt  = owned(game_id, CardName.GOLD)
     rc_cnt  = owned(game_id, CardName.HIRELING)
+    bd_cnt  = owned(game_id, CardName.BANDIT)
+    br_cnt  = owned(game_id, CardName.BUREAUCRAT)
+    ch_cnt  = owned(game_id, CardName.CHANCELLOR)
 
-    prov_left     = stock.get(CardName.PROVINCE, 0)
-    curses_left   = stock.get(CardName.CURSE, 0) if CardName.CURSE in stock else 0
-    villages_left = stock.get(CardName.VILLAGE, 0) if CardName.VILLAGE in stock else 0
+    AGGRO_DUCHY = (prov_left <= 4) or ((max_opponent_score - my_score) >= 4)
 
-    # Nouveaux drapeaux "inversés"
-    we_lead     = my_score > max_opponent_score
-    enemy_leads = max_opponent_score > my_score
+    print(f"[buy] t={turn_no} prov={prov_left} curses={curses_left} gardens={gardens_left} deck={deck_sz} "
+        f"owned RC={rc_cnt} VG={vg_cnt} MK={mk_cnt} LAB={lab_cnt} WT={wt_cnt} SM={sm_cnt} GOLD={gd_cnt} "
+        f"BANDIT={bd_cnt} BUREAU={br_cnt} CHANC={ch_cnt} enemy_alive={enemy_alive} "
+        f"AGGRO_CURSE={AGGRO_CURSE} AGGRO_GREEN={AGGRO_GREEN} GARDENS_ONLINE={GARDENS_ONLINE}")
 
-    # Quand l’ennemi mène -> on verdit agressivement
-    AGGRO_GREEN = enemy_leads
-    # Quand on mène -> on appuie l’attaque (sorcières)
-    AGGRO_CURSE = we_lead
-
-    print(f"[buy] t={turn_no} score(me={my_score}, opp={max_opponent_score}) "
-          f"we_lead={we_lead} enemy_leads={enemy_leads} prov={prov_left} curses={curses_left} "
-          f"owned RC={rc_cnt} VG={vg_cnt} MK={mk_cnt} LAB={lab_cnt} WT={wt_cnt} SM={sm_cnt} GOLD={gd_cnt} "
-          f"villages_left={villages_left}")
-
-    # 0) Si ennemi mène (AGGRO_GREEN), on prend des points TÔT
+    # ===== MODE RATTRAPAGE / GREEN RUSH (on est derrière) =====
     if AGGRO_GREEN:
-        if can_buy(CardName.PROVINCE):
+        if can_buy(CardName.PROVINCE):     # Province d’abord
             return do_buy(CardName.PROVINCE)
-        # Duchy très tôt si pas la Province
-        if can_buy(CardName.DUCHY):
+        if can_buy(CardName.DUCHY):        # puis Duchy
             return do_buy(CardName.DUCHY)
+        # Gardens vite si dispo et (deck volumineux ou mid/late)
+        if gardens_left and can_buy(CardName.GARDENS) and (GARDENS_ONLINE or turn_no >= 8):
+            return do_buy(CardName.GARDENS)
 
-    # 1) Early game
+    # ===== Province si possible (toujours top prio hors green rush) =====
+    if can_buy(CardName.PROVINCE):
+        return do_buy(CardName.PROVINCE)
+
+    # ===== EARLY GAME (T1–T8) — mise en place + “cancer” si on mène =====
     if turn_no <= 8:
-        # (Inversé) Si on mène ET il reste des curses -> Witch d'abord
-        if AGGRO_CURSE and curses_left > 0 and wt_cnt < 1 and can_buy(CardName.WITCH):
+        if AGGRO_CURSE and curses_left > 0 and wt_cnt < 2 and can_buy(CardName.WITCH):
             return do_buy(CardName.WITCH)
-
-        # Installer HIRELING tôt (toujours bon)
         if can_buy(CardName.HIRELING) and rc_cnt < 2:
             return do_buy(CardName.HIRELING)
-
-        # Stabiliser le moteur
-        if can_buy(CardName.MARKET) and mk_cnt < 2:
-            return do_buy(CardName.MARKET)
-
-        # Un premier Gold pour la montée
-        if can_buy(CardName.GOLD) and gd_cnt < 1:
-            return do_buy(CardName.GOLD)
-
-        if can_buy(CardName.SILVER):
-            return do_buy(CardName.SILVER)
-
-    # 2) Milieu de partie
-    if curses_left > 0:
-        # (Inversé) Cap Witch élevé si on mène, réduit si on est derrière
-        cap_witch = 3 if AGGRO_CURSE else 1  # derrière on n’investit pas trop en attaques
-        if can_buy(CardName.WITCH) and wt_cnt < cap_witch:
-            return do_buy(CardName.WITCH)
-
-        # Stabilité
         if can_buy(CardName.MARKET) and mk_cnt < 2:
             return do_buy(CardName.MARKET)
         if can_buy(CardName.LABORATORY) and lab_cnt < 2:
             return do_buy(CardName.LABORATORY)
+        if can_buy(CardName.GOLD) and gd_cnt < 1:
+            return do_buy(CardName.GOLD)
+        if AGGRO_CURSE and can_buy(CardName.BANDIT) and bd_cnt < 1:
+            return do_buy(CardName.BANDIT)
+        if can_buy(CardName.SILVER):
+            return do_buy(CardName.SILVER)
 
-        # HIRELING (cap 3)
-        if can_buy(CardName.HIRELING) and rc_cnt < 3:
-            return do_buy(CardName.HIRELING)
+    # ===== MID GAME — si on mène : mass attaques ; sinon stabilité =====
+    if AGGRO_CURSE:
+        cap_witch = 3 if (enemy_alive and villages_left <= 7) else 2
+        if curses_left > 0 and can_buy(CardName.WITCH) and wt_cnt < cap_witch:
+            return do_buy(CardName.WITCH)
+        if can_buy(CardName.BANDIT) and bd_cnt < 2:
+            return do_buy(CardName.BANDIT)
+        if can_buy(CardName.BUREAUCRAT) and br_cnt < 2:
+            return do_buy(CardName.BUREAUCRAT)
 
-        # (Optionnel) deny Village si on mène pour casser leur moteur
-        if AGGRO_CURSE and enemy_alive and villages_left > 0 and vg_cnt < 2 and can_buy(CardName.VILLAGE):
-            return do_buy(CardName.VILLAGE)
-
-    # 3) Si on est derrière (AGGRO_GREEN), continuer de verdir agressivement
-    if AGGRO_GREEN:
-        if can_buy(CardName.PROVINCE):
-            return do_buy(CardName.PROVINCE)
-        if can_buy(CardName.DUCHY):
-            return do_buy(CardName.DUCHY)
-
-    # 4) Plan standard (fallback si égalité ou rien au-dessus)
-    if can_buy(CardName.PROVINCE):
-        return do_buy(CardName.PROVINCE)
-
-    # Or / Moteur
-    if can_buy(CardName.HIRELING) and rc_cnt < 3:
-        return do_buy(CardName.HIRELING)
-    if can_buy(CardName.GOLD) and gd_cnt < 2:
-        return do_buy(CardName.GOLD)
+    # Moteur / stabilité
     if can_buy(CardName.MARKET) and mk_cnt < 2:
         return do_buy(CardName.MARKET)
     if can_buy(CardName.LABORATORY) and lab_cnt < 2:
         return do_buy(CardName.LABORATORY)
+    if can_buy(CardName.HIRELING) and rc_cnt < 3:
+        return do_buy(CardName.HIRELING)
 
-    # Witch encore utile uniquement si curses restent et qu'on n'en a presque pas
-    if curses_left > 0 and can_buy(CardName.WITCH) and wt_cnt < (2 if AGGRO_CURSE else 1):
+    # Deny Village si nécessaire
+    if enemy_alive and villages_left > 0 and vg_cnt < 2 and can_buy(CardName.VILLAGE):
+        return do_buy(CardName.VILLAGE)
+
+    # Green si derrière + Gardens en ligne
+    if AGGRO_GREEN and gardens_left and GARDENS_ONLINE and can_buy(CardName.GARDENS):
+        return do_buy(CardName.GARDENS)
+
+    # Duchy agressif si course aux points
+    if AGGRO_DUCHY and can_buy(CardName.DUCHY):
+        return do_buy(CardName.DUCHY)
+
+    # À 6$ : Gold (cap 2)
+    if can_buy(CardName.GOLD) and gd_cnt < 2:
+        return do_buy(CardName.GOLD)
+
+    # À 5$ : Witch (si Curses), sinon Bandit
+    if curses_left > 0 and can_buy(CardName.WITCH) and wt_cnt < 2:
         return do_buy(CardName.WITCH)
+    if can_buy(CardName.BANDIT) and bd_cnt < 2:
+        return do_buy(CardName.BANDIT)
 
-    # Smithy si on a déjà des +actions
-    if can_buy(CardName.SMITHY) and (vg_cnt + mk_cnt) >= 1 and sm_cnt < 2:
+    # À 4$ : Bureaucrat (cap 2) > Smithy (si on a des +actions)
+    if can_buy(CardName.BUREAUCRAT) and br_cnt < 2:
+        return do_buy(CardName.BUREAUCRAT)
+    if can_buy(CardName.SMITHY) and (vg_cnt + mk_cnt + lab_cnt) >= 1 and sm_cnt < 2:
         return do_buy(CardName.SMITHY)
 
+    # À 3$ : 1 Woodcutter pour +buy > 1 Chancellor > Silver
+    if can_buy(CardName.WOODCUTTER) and owned(game_id, CardName.WOODCUTTER) < 1:
+        return do_buy(CardName.WOODCUTTER)
+    if can_buy(CardName.CHANCELLOR) and ch_cnt < 1:
+        return do_buy(CardName.CHANCELLOR)
     if can_buy(CardName.SILVER):
         return do_buy(CardName.SILVER)
 
-    if can_buy(CardName.DUCHY):
-        return do_buy(CardName.DUCHY)
-
+    # Estate tardif
     if turn_no > 10 and can_buy(CardName.ESTATE):
         return do_buy(CardName.ESTATE)
+
+
 
 
 
