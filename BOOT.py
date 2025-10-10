@@ -192,7 +192,7 @@ def root() -> str:
 
 @app.get("/name")
 def name() -> str:
-    return "Monthy Python"
+    return "Monty Python"
 
 
 @app.get("/start_game")
