@@ -192,7 +192,7 @@ def root() -> str:
 
 @app.get("/name")
 def name() -> str:
-    return "Monty Python"
+    return "Bully"
 
 
 @app.get("/start_game")
@@ -226,6 +226,7 @@ DOUBLE_PROVINCE_BUYS = 2      # si on a >= buys pour tenter double achat
 
 @app.post("/play")
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
+    print(game)
     # --- trouver "moi" ---
     me = next((p for p in game.players if p.hand is not None), None)
     if not me or not me.hand:
