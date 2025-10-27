@@ -1,4 +1,3 @@
-# dopynion_strategy_full.py
 import html
 import threading
 from pathlib import Path
@@ -464,17 +463,24 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         if can_buy(getattr(CardName, "PROVINCE", None)):
             return do_buy(getattr(CardName, "PROVINCE", None))
 
-    # S3: Hybrid Witch->Gold opening (generic)
-    if turn_no <= 6 and curses_left > 0 and owned(game_id, getattr(CardName, "WITCH", None)) < 2 and can_buy(getattr(CardName, "WITCH", None)):
+    # S3: Hybrid Witch->Gold opening (generic) and conversion rules
+    # Aggressively pick WITCH early if we're behind to slow opponents,
+    # otherwise prioritise building money (Gold) and engines.
+    if is_behind and turn_no <= 6 and curses_left > 0 and owned(game_id, getattr(CardName, "WITCH", None)) < 2 and can_buy(getattr(CardName, "WITCH", None)):
         return do_buy(getattr(CardName, "WITCH", None))
     if owned(game_id, getattr(CardName, "MARKET", None)) < 2 and can_buy(getattr(CardName, "MARKET", None)):
         return do_buy(getattr(CardName, "MARKET", None))
     if owned(game_id, getattr(CardName, "LABORATORY", None)) < 2 and can_buy(getattr(CardName, "LABORATORY", None)):
         return do_buy(getattr(CardName, "LABORATORY", None))
-    if owned(game_id, getattr(CardName, "GOLD", None)) < 2 and can_buy(getattr(CardName, "GOLD", None)):
+    # conversion: if we have a lot of low-value coins in hand, convert upward
+    if hq(getattr(CardName, "COPPER", None)) >= 3 and can_buy(getattr(CardName, "SILVER", None)):
+        print(f"[play] conversion rule: {hq(getattr(CardName, 'COPPER', None))} coppers -> buy SILVER")
+        return do_buy(getattr(CardName, "SILVER", None))
+    if hq(getattr(CardName, "SILVER", None)) >= 3 and can_buy(getattr(CardName, "GOLD", None)):
+        print(f"[play] conversion rule: {hq(getattr(CardName, 'SILVER', None))} silvers -> buy GOLD")
         return do_buy(getattr(CardName, "GOLD", None))
 
-    # S4: Anti Witch-Spam
+    # S4: Anti Witch-Spam / stabilise economy
     if WITCH_SPAM_MODE:
         if owned(game_id, getattr(CardName, "MARKET", None)) < 2 and can_buy(getattr(CardName, "MARKET", None)):
             return do_buy(getattr(CardName, "MARKET", None))
@@ -518,14 +524,22 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
                     return do_buy(getattr(CardName, "GARDENS", None))
 
     # S7: Late-game / safe fallback and endgame
-    if prov_left <= 4 and can_buy(getattr(CardName, "PROVINCE", None)):
-        return do_buy(getattr(CardName, "PROVINCE", None))
-    if owned(game_id, getattr(CardName, "GOLD", None)) < 2 and can_buy(getattr(CardName, "GOLD", None)):
-        return do_buy(getattr(CardName, "GOLD", None))
+    # Always try to take provinces when possible (highest priority)
     if can_buy(getattr(CardName, "PROVINCE", None)):
         return do_buy(getattr(CardName, "PROVINCE", None))
+    # If we can't buy province right now, prefer Gold to ramp economy
+    if owned(game_id, getattr(CardName, "GOLD", None)) < 4 and can_buy(getattr(CardName, "GOLD", None)):
+        return do_buy(getattr(CardName, "GOLD", None))
+    # If we are behind, pick up attacks to disrupt
+    if is_behind and hasattr(CardName, "WITCH") and curses_left > 0 and owned(game_id, getattr(CardName, "WITCH", None)) < 3 and can_buy(getattr(CardName, "WITCH", None)):
+        return do_buy(getattr(CardName, "WITCH", None))
+    # conversion fallback: upgrade silvers to gold where possible
+    if hq(getattr(CardName, "SILVER", None)) >= 3 and can_buy(getattr(CardName, "GOLD", None)):
+        return do_buy(getattr(CardName, "GOLD", None))
+    # otherwise take Duchy if near end or Province shortage
     if prov_left <= 4 and can_buy(getattr(CardName, "DUCHY", None)):
         return do_buy(getattr(CardName, "DUCHY", None))
+    # take Silver as economic fallback
     if can_buy(getattr(CardName, "SILVER", None)):
         return do_buy(getattr(CardName, "SILVER", None))
 
@@ -533,15 +547,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     if hasattr(CardName, "MILITIA") and owned(game_id, getattr(CardName, "MILITIA", None)) < 1 and (owned(game_id, getattr(CardName, "WITCH", None)) + owned(game_id, getattr(CardName, "SMITHY", None)) + owned(game_id, getattr(CardName, "MILITIA", None))) < 2 and can_buy(getattr(CardName, "MILITIA", None)):
         return do_buy(getattr(CardName, "MILITIA", None))
 
-    # S7 fallback duplicates (defensive)
-    if prov_left <= 4 and can_buy(getattr(CardName, "PROVINCE", None)):
-        return do_buy(getattr(CardName, "PROVINCE", None))
-    if owned(game_id, getattr(CardName, "GOLD", None)) < 2 and can_buy(getattr(CardName, "GOLD", None)):
-        return do_buy(getattr(CardName, "GOLD", None))
-    if can_buy(getattr(CardName, "PROVINCE", None)):
-        return do_buy(getattr(CardName, "PROVINCE", None))
-    if prov_left <= 4 and can_buy(getattr(CardName, "DUCHY", None)):
-        return do_buy(getattr(CardName, "DUCHY", None))
+    # final defensive fallback
     if can_buy(getattr(CardName, "SILVER", None)):
         return do_buy(getattr(CardName, "SILVER", None))
 
