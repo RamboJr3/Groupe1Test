@@ -1,10 +1,3 @@
-Dopynion documentation
-API documentation
-Read the documentation.
-
-Code template
-The code of this website is:
-
 import html
 from pathlib import Path
 from typing import Annotated
@@ -22,10 +15,6 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 app = FastAPI()
-
-#####################################################
-# Data model for responses
-#####################################################
 
 
 class DopynionResponseBool(BaseModel):
