@@ -1,4 +1,3 @@
-# BOOT_ULTIME.py
 import html
 import threading
 from pathlib import Path
@@ -187,13 +186,12 @@ def unknown_exception_handler(_request: Request, exc: Exception) -> JSONResponse
         },
     )
 
-
 # =============================================================================
 # Strategy metadata
 # =============================================================================
 @app.get("/name")
 def name() -> str:
-    return "Bully-Ultime"
+    return "Bully"
 
 @app.get("/start_game")
 def start_game(game_id: GameIdDependency) -> DopynionResponseStr:
@@ -218,22 +216,22 @@ def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
 # =============================================================================
 # Constantes de stratégie & utilitaires
 # =============================================================================
-PROV_THRESHOLD         = 4        # pivot vert
-DUCHY_PIVOT            = 4
-ESTATE_PIVOT           = 2
-SCORE_DELTA_ENDING     = 6        # si on mène de >=6 VP → fin accélérée
-EARLY_WITCH_TURNS      = 7
-EARLY_ATTACK_CAP       = 2
-MAX_GOLD_BEFORE_GREEN  = 4
-GARDENS_MIN_DECK       = 30
-GARDENS_MAX_BUYS       = 6
+PROV_THRESHOLD         = 5      # on verdit plus tôt
+DUCHY_PIVOT            = 5
+ESTATE_PIVOT           = 3
+SCORE_DELTA_ENDING     = 5
+EARLY_WITCH_TURNS      = 8
+EARLY_ATTACK_CAP       = 3       # Witch jusqu'à 3 si Curses encore là
+MAX_GOLD_BEFORE_GREEN  = 3
+GARDENS_MIN_DECK       = 24
+GARDENS_MAX_BUYS       = 8
 MIN_ENGINE_PLUS_ACTION = 2
-FULL_PILE_SIZE         = 10       # défaut
+FULL_PILE_SIZE         = 10
 
-COUNCIL_CAP            = 2        # limite Council Room pour éviter de nourrir trop l’adversaire
-DSHORE_CAP             = 2        # limite Distant Shore (évite sur-clog Estate)
-MAGNET_THRESH_TREAS    = 5        # seuil trésors deck pour justifier Magnet
-LIBRARY_TOGGLES_ACTION = True     # on accepte les prompts Library (skip actions terminales)
+COUNCIL_CAP            = 2       # limite Council Room
+DSHORE_CAP             = 1       # limite Distant Shore (éviter self-clog)
+MAGNET_THRESH_TREAS    = 6       # seuil trésors pour Magnet
+LIBRARY_TOGGLES_ACTION = True
 
 def _in(h: Dict[CardName, int], c: Optional[CardName]) -> int:
     if c is None:
@@ -255,6 +253,20 @@ def _first_defined(*names: str) -> Optional[CardName]:
         if hasattr(CardName, n):
             return getattr(CardName, n)
     return None
+
+# --- Helpers adaptatifs (vitesse d’épuisement de piles / présence) ---
+def any_in_supply(*names: str) -> bool:
+    return any(hasattr(CardName, n) for n in names)
+
+def pile_depleted_fast(stock: Dict[CardName, int], name: str, threshold_taken: int) -> bool:
+    q = _stock_qty(stock, name)
+    if q == 0:
+        return True
+    return (FULL_PILE_SIZE - q) >= threshold_taken
+
+def count_taken(stock: Dict[CardName, int], name: str) -> int:
+    q = _stock_qty(stock, name)
+    return (FULL_PILE_SIZE - q) if 0 <= q <= FULL_PILE_SIZE else 0
 
 # =============================================================================
 # COEUR : /play
@@ -291,25 +303,18 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     is_behind  = score_lead < 0
 
     # ==== PHASE ACTIONS ====
-    def has(cname: str) -> bool:
-        c = getattr(CardName, cname, None)
-        return c is not None and _in(hand, c) > 0
-
-    engine_actions = [
-        "MARKET", "LABORATORY", "VILLAGE", "FESTIVAL", "FARMINGVILLAGE", "CEILLOR", "DISTANTSHORE"
-    ]
-    attacks = []
-    for a in ("FORTUNETELLER", "WITCH", "MILITIA", "BUREAUCRAT", "BANDIT"):
-        if hasattr(CardName, a):
-            attacks.append(a)
-    utilities = ["COUNCILROOM", "SMITHY", "LIBRARY", "MAGNET", "ADVENTURER", "WORKSHOP", "WOODCUTTER", "CHANCELLOR"]
+    anti_draw_combos = any_in_supply("LIBRARY", "COUNCILROOM")
+    engine_actions: List[str] = ["MARKET","LABORATORY","VILLAGE","FESTIVAL","FARMINGVILLAGE","CEILLOR","DISTANTSHORE"]
+    attacks: List[str] = (["MILITIA","FORTUNETELLER","WITCH","BUREAUCRAT","BANDIT"] if anti_draw_combos
+                          else ["FORTUNETELLER","WITCH","MILITIA","BUREAUCRAT","BANDIT"])
+    utilities: List[str] = ["COUNCILROOM","SMITHY","LIBRARY","MAGNET","ADVENTURER","WORKSHOP","WOODCUTTER","CHANCELLOR"]
 
     action_priority: List[CardName] = []
-    seen: set = set()
+    _seen: set = set()
     for name in [*engine_actions, *attacks, *utilities]:
         c = getattr(CardName, name, None)
-        if c and c not in seen and name in EFFECTS:
-            seen.add(c)
+        if c and c not in _seen and name in EFFECTS:
+            _seen.add(c)
             action_priority.append(c)
 
     for a in action_priority:
@@ -340,7 +345,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         if c is None:
             return False
         with with_game_lock(game_id):
-            ts_local = _sess(game_id)
+            _ = _sess(game_id)  # lecture
         cost = COST.get(c, None)
         if cost is None:
             return False
@@ -365,19 +370,27 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     labs_left      = _stock_qty(stock, "LABORATORY")
     markets_left   = _stock_qty(stock, "MARKET")
     festivals_left = _stock_qty(stock, "FESTIVAL")
+    farming_left   = _stock_qty(stock, "FARMINGVILLAGE")
     gardens_left   = _stock_qty(stock, "GARDENS")
 
-    BIGMONEY_LIKELY  = (labs_left >= 8 and markets_left >= 8 and villages_left >= 8 and curses_left == FULL_PILE_SIZE)
-    ENGINE_CONTEST   = (villages_left <= 7 or labs_left <= 8 or markets_left <= 8)
-    WITCH_MODE       = (curses_left > 0 and turn_no <= EARLY_WITCH_TURNS)
-    MILITIA_MODE     = (festivals_left <= 8 and curses_left == FULL_PILE_SIZE)
-    GARDENS_MODE     = (gardens_left > 0 and deck_sz >= GARDENS_MIN_DECK and prov_left >= 5 and is_behind)
+    ENGINE_DENY    = (
+        pile_depleted_fast(stock,"VILLAGE",3) or
+        pile_depleted_fast(stock,"LABORATORY",3) or
+        pile_depleted_fast(stock,"MARKET",3) or
+        pile_depleted_fast(stock,"FARMINGVILLAGE",3)
+    )
+    GARDENS_RACE   = gardens_left>0 and (pile_depleted_fast(stock,"GARDENS",2) or deck_sz>=GARDENS_MIN_DECK)
+    CURSES_EXIST   = curses_left>0
+    DRAW_COMBOS    = any_in_supply("LIBRARY","COUNCILROOM")
+    DSHORE_IN_SUP  = any_in_supply("DISTANTSHORE")
 
-    # 0) Double Province s’il y a les buys et la thune
-    if buys_left() >= 2 and money_available() >= 16 and _stock_qty(stock, "PROVINCE") >= 2:
+    BIGMONEY_LIKELY  = (labs_left>=8 and markets_left>=8 and villages_left>=8 and curses_left==FULL_PILE_SIZE)
+
+    # ==== Double Province si possible
+    if buys_left() >= 2 and money_available() >= 16 and prov_left >= 2:
         return do_buy(getattr(CardName, "PROVINCE"))
 
-    # 1) Fin agressive si on mène
+    # ==== Fin agressive + 3-piles si on mène
     if is_ahead and (prov_left <= PROV_THRESHOLD or score_lead >= SCORE_DELTA_ENDING):
         if can_buy(getattr(CardName, "PROVINCE", None)):
             return do_buy(getattr(CardName, "PROVINCE"))
@@ -385,37 +398,36 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             return do_buy(getattr(CardName, "DUCHY"))
         if prov_left <= ESTATE_PIVOT and can_buy(getattr(CardName, "ESTATE", None)):
             return do_buy(getattr(CardName, "ESTATE"))
-        # 3 piles : on vide des piles bon marché
-        for target in [_first_defined("ESTATE"), _first_defined("VILLAGE"),
-                       _first_defined("WORKSHOP"), _first_defined("WOODCUTTER"), _first_defined("SMITHY")]:
+        for target in [_first_defined("ESTATE"), _first_defined("WORKSHOP"), _first_defined("VILLAGE"),
+                       _first_defined("WOODCUTTER"), _first_defined("SMITHY"), _first_defined("CEILLOR")]:
             if target and can_buy(target):
                 return do_buy(target)
 
-    # 2) Early attaques (Witch/Fortuneteller) pour générer l’avantage
-    if WITCH_MODE and owned(game_id, getattr(CardName, "WITCH", None)) < EARLY_ATTACK_CAP and can_buy(getattr(CardName, "WITCH", None)):
+    # ==== Attaques tant qu'il reste des Curses
+    if CURSES_EXIST and owned(game_id, getattr(CardName, "WITCH", None)) < EARLY_ATTACK_CAP and can_buy(getattr(CardName, "WITCH", None)):
         return do_buy(getattr(CardName, "WITCH", None))
-    if curses_left > 0 and owned(game_id, getattr(CardName, "FORTUNETELLER", None)) < 2 and can_buy(getattr(CardName, "FORTUNETELLER", None)):
+    if CURSES_EXIST and owned(game_id, getattr(CardName, "FORTUNETELLER", None)) < 3 and can_buy(getattr(CardName, "FORTUNETELLER", None)):
         return do_buy(getattr(CardName, "FORTUNETELLER", None))
 
-    # 3) Engine contest (deny + chain)
-    if ENGINE_CONTEST:
-        if villages_left > 0 and owned(game_id, getattr(CardName, "VILLAGE", None)) < 2 and can_buy(getattr(CardName, "VILLAGE", None)):
+    # ==== Anti Library/CouncilRoom : Militia > Bandit
+    if DRAW_COMBOS:
+        if owned(game_id, getattr(CardName, "MILITIA", None)) < 2 and can_buy(getattr(CardName, "MILITIA", None)):
+            return do_buy(getattr(CardName, "MILITIA", None))
+        if owned(game_id, getattr(CardName, "BANDIT", None)) < 1 and can_buy(getattr(CardName, "BANDIT", None)):
+            return do_buy(getattr(CardName, "BANDIT", None))
+
+    # ==== Engine deny : on assèche +A/+pioche
+    if ENGINE_DENY:
+        if villages_left>0 and owned(game_id, getattr(CardName, "VILLAGE", None)) < 3 and can_buy(getattr(CardName, "VILLAGE", None)):
             return do_buy(getattr(CardName, "VILLAGE", None))
-        if owned(game_id, getattr(CardName, "MARKET", None)) < 2 and can_buy(getattr(CardName, "MARKET", None)):
+        if owned(game_id, getattr(CardName, "MARKET", None)) < 3 and can_buy(getattr(CardName, "MARKET", None)):
             return do_buy(getattr(CardName, "MARKET", None))
         if owned(game_id, getattr(CardName, "LABORATORY", None)) < 3 and can_buy(getattr(CardName, "LABORATORY", None)):
             return do_buy(getattr(CardName, "LABORATORY", None))
         if owned(game_id, getattr(CardName, "FARMINGVILLAGE", None)) < 2 and can_buy(getattr(CardName, "FARMINGVILLAGE", None)):
             return do_buy(getattr(CardName, "FARMINGVILLAGE", None))
-        # Militia si on a les +Actions
-        plus_actions = owned(game_id, getattr(CardName, "VILLAGE", None)) + owned(game_id, getattr(CardName, "FESTIVAL", None)) + owned(game_id, getattr(CardName, "MARKET", None)) + owned(game_id, getattr(CardName, "FARMINGVILLAGE", None))
-        if plus_actions >= MIN_ENGINE_PLUS_ACTION and owned(game_id, getattr(CardName, "MILITIA", None)) < 2 and can_buy(getattr(CardName, "MILITIA", None)):
-            return do_buy(getattr(CardName, "MILITIA", None))
-        # Bandit pour casser l’éco adverse
-        if owned(game_id, getattr(CardName, "BANDIT", None)) < 1 and can_buy(getattr(CardName, "BANDIT", None)):
-            return do_buy(getattr(CardName, "BANDIT", None))
 
-    # 4) Big Money probable
+    # ==== Big Money probable
     if BIGMONEY_LIKELY:
         if can_buy(getattr(CardName, "PROVINCE", None)) and (prov_left <= 6 or my_score >= opp_max):
             return do_buy(getattr(CardName, "PROVINCE", None))
@@ -428,44 +440,36 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         if can_buy(getattr(CardName, "SILVER", None)):
             return do_buy(getattr(CardName, "SILVER", None))
 
-    # 5) Stabilisation anti-Militia
-    if MILITIA_MODE:
-        if owned(game_id, getattr(CardName, "FESTIVAL", None)) < 2 and can_buy(getattr(CardName, "FESTIVAL", None)):
-            return do_buy(getattr(CardName, "FESTIVAL", None))
-        plus_actions = owned(game_id, getattr(CardName, "VILLAGE", None)) + owned(game_id, getattr(CardName, "FESTIVAL", None)) + owned(game_id, getattr(CardName, "MARKET", None))
-        cap_militia = 2 if plus_actions >= 2 else 1
-        if owned(game_id, getattr(CardName, "MILITIA", None)) < cap_militia and can_buy(getattr(CardName, "MILITIA", None)):
+    # ==== Anti-Distant Shore : on se limite & on renforce les attaques
+    if DSHORE_IN_SUP:
+        if owned(game_id, getattr(CardName, "DISTANTSHORE", None)) < DSHORE_CAP and can_buy(getattr(CardName, "DISTANTSHORE", None)):
+            return do_buy(getattr(CardName, "DISTANTSHORE", None))
+        if owned(game_id, getattr(CardName, "MILITIA", None)) < 2 and can_buy(getattr(CardName, "MILITIA", None)):
             return do_buy(getattr(CardName, "MILITIA", None))
-        if owned(game_id, getattr(CardName, "MARKET", None)) < 2 and can_buy(getattr(CardName, "MARKET", None)):
-            return do_buy(getattr(CardName, "MARKET", None))
-        if owned(game_id, getattr(CardName, "LABORATORY", None)) < 2 and can_buy(getattr(CardName, "LABORATORY", None)):
-            return do_buy(getattr(CardName, "LABORATORY", None))
+        if owned(game_id, getattr(CardName, "BANDIT", None)) < 1 and can_buy(getattr(CardName, "BANDIT", None)):
+            return do_buy(getattr(CardName, "BANDIT", None))
 
-    # 6) Routes spécialisées cartes “nouvelles”
-    # Council Room (limité) pour pousser des doubles achats (Province+Province / Province+Duchy)
-    if owned(game_id, getattr(CardName, "COUNCILROOM", None)) < COUNCIL_CAP and can_buy(getattr(CardName, "COUNCILROOM", None)):
-        return do_buy(getattr(CardName, "COUNCILROOM", None))
-    # Distant Shore cap (évite spam d'Estate)
-    if owned(game_id, getattr(CardName, "DISTANTSHORE", None)) < DSHORE_CAP and can_buy(getattr(CardName, "DISTANTSHORE", None)):
-        return do_buy(getattr(CardName, "DISTANTSHORE", None))
-    # Magnet si deck riche en trésors
+    # ==== Magnet si deck très riche en trésors
     total_treas_est = owned(game_id, getattr(CardName, "COPPER", None)) + owned(game_id, getattr(CardName, "SILVER", None)) + owned(game_id, getattr(CardName, "GOLD", None))
     if total_treas_est >= MAGNET_THRESH_TREAS and can_buy(getattr(CardName, "MAGNET", None)):
         return do_buy(getattr(CardName, "MAGNET", None))
-    # Workshop en mode deny/3-piles (utile sur boards lents)
+
+    # ==== Workshop utilitaire (deny + 3-piles)
     if can_buy(getattr(CardName, "WORKSHOP", None)) and owned(game_id, getattr(CardName, "WORKSHOP", None)) < 2:
         return do_buy(getattr(CardName, "WORKSHOP", None))
 
-    # 7) Gardens si derrière et deck volumineux
-    if GARDENS_MODE:
+    # ==== Anti-Gardens (course ou deck volumineux)
+    if GARDENS_RACE:
         gardens_value = deck_sz // 10
-        cap = min(GARDENS_MAX_BUYS, gardens_value)
+        cap = min(GARDENS_MAX_BUYS, max(3, gardens_value))
+        if owned(game_id, getattr(CardName, "WORKSHOP", None)) < 2 and can_buy(getattr(CardName, "WORKSHOP", None)):
+            return do_buy(getattr(CardName, "WORKSHOP", None))
         if owned(game_id, getattr(CardName, "GARDENS", None)) < cap and can_buy(getattr(CardName, "GARDENS", None)):
             return do_buy(getattr(CardName, "GARDENS", None))
-        if owned(game_id, getattr(CardName, "GOLD", None)) < 3 and can_buy(getattr(CardName, "GOLD", None)):
-            return do_buy(getattr(CardName, "GOLD", None))
+        if can_buy(getattr(CardName, "ESTATE", None)):  # accélère 3-piles
+            return do_buy(getattr(CardName, "ESTATE", None))
 
-    # 8) Conversions éco simples
+    # ==== Conversions & fin standard
     if _in(hand, getattr(CardName, "COPPER", None)) >= 3 and can_buy(getattr(CardName, "SILVER", None)):
         print("[play] conversion: >=3 COPPER -> SILVER")
         return do_buy(getattr(CardName, "SILVER", None))
@@ -473,7 +477,6 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         print("[play] conversion: >=3 SILVER -> GOLD")
         return do_buy(getattr(CardName, "GOLD", None))
 
-    # 9) Fin standard
     if can_buy(getattr(CardName, "PROVINCE", None)):
         return do_buy(getattr(CardName, "PROVINCE", None))
     if owned(game_id, getattr(CardName, "GOLD", None)) < MAX_GOLD_BEFORE_GREEN and can_buy(getattr(CardName, "GOLD", None)):
