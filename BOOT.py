@@ -173,7 +173,7 @@ def root() -> str:
 
 @app.get("/name")
 def name() -> str:
-    return "Rhum & Ruin v1"
+    return "Bully_Test"
 
 @app.get("/start_game")
 def start_game(game_id: GameIdDependency) -> DopynionResponseStr:
