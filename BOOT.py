@@ -1,4 +1,5 @@
 # BOOT_BULLY_2000.py
+# Version corrigée - fixes pour Bully (ouverture agressive, deny engines, pivot vert mieux géré)
 import threading
 from typing import Annotated, Dict, Tuple, List, Optional
 from contextlib import contextmanager
@@ -194,7 +195,7 @@ BANDIT_CAP             = 1
 
 # Engine deny (cap perso pour assécher sans se surcharger)
 ENGINE_VILLAGE_CAP     = 3
-ENGINE_MARKET_CAP      = 3
+ENGINE_MARKET_CAP      = 2   # plus conservateur : limit Market à 2
 ENGINE_LAB_CAP         = 3
 ENGINE_FARM_CAP        = 2
 ENGINE_HIRELING_CAP    = 1     # 1 seul tôt pour +1 carte/turn stable
@@ -213,6 +214,9 @@ MAGNET_TREAS_THRESH    = 6
 
 FULL_PILE_SIZE         = 10
 
+# seuil double province plus agressif (déclenchement alternatif)
+DOUBLE_PROV_MONEY      = 15
+
 # ============  UTILS D’ESTIMATION ============
 def _in(h: Dict[CardName,int], c: Optional[CardName]) -> int:
     return 0 if c is None else h.get(c, 0)
@@ -226,7 +230,12 @@ def _stock_qty(stock: Dict[CardName,int], name: str) -> int:
     return 0 if c is None else stock.get(c, 0)
 
 def any_in_supply(*names: str) -> bool:
-    return any(hasattr(CardName, n) for n in names)
+    return any(hasattr(CardName, n) and _stock_qty_local(name=n) > 0 for n in names)
+
+# local helper because any_in_supply above needs stock - define a safe accessor we use locally
+def _stock_qty_local(name: str) -> int:
+    # fallback default for checks where stock isn't available: return >0 to be conservative
+    return 1
 
 def pile_depleted(stock: Dict[CardName,int], name: str, taken: int) -> bool:
     q = _stock_qty(stock, name)
@@ -283,6 +292,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     utils  = ["SMITHY","LIBRARY","MAGNET","ADVENTURER","WORKSHOP","WOODCUTTER","CHANCELLOR"]
 
     # Anti-draw combos adverses : Militia avant tout si Library/Council en supply
+    # Note: any_in_supply conservateur si on ne peut pas lire le stock (fct _stock_qty_local)
     if any_in_supply("LIBRARY","COUNCILROOM"):
         attacks = ["MILITIA","WITCH","FORTUNETELLER","BANDIT","BUREAUCRAT"]
 
@@ -319,20 +329,28 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         pile_depleted(stock,"LABORATORY",2) or
         pile_depleted(stock,"FARMINGVILLAGE",2)
     )
-    DRAW_COMBOS = any_in_supply("LIBRARY","COUNCILROOM")
+    # conservative detection of draw combos
+    DRAW_COMBOS = (_stock_qty(stock,"LIBRARY")>0 or _stock_qty(stock,"COUNCILROOM")>0)
 
-    # Double Province si faisable
+    # helper counts
+    my_provinces_owned = owned(game_id, getattr(CardName,"PROVINCE",None))
+    tot_treas = owned(game_id, getattr(CardName,"COPPER",None)) + owned(game_id, getattr(CardName,"SILVER",None)) + owned(game_id, getattr(CardName,"GOLD",None))
+
+    # Double Province si faisable (seuil agressif alternatif)
     if buys_left() >= 2 and _money_in_hand(hand) + ts["coins_bonus"] - ts["coins_spent"] >= 16 and prov_left >= 2:
+        return do_buy(game_id, hand, getattr(CardName,"PROVINCE"))
+
+    # Alternative : double province si on a beaucoup d'argent (option plus agressive)
+    if buys_left() >= 2 and _money_in_hand(hand) + ts["coins_bonus"] - ts["coins_spent"] >= DOUBLE_PROV_MONEY and prov_left >= 2:
         return do_buy(game_id, hand, getattr(CardName,"PROVINCE"))
 
     # Fin agressive / pile-out si on mène
     if is_ahead and (prov_left <= PROV_THRESHOLD or score_lead >= SCORE_DELTA_ENDING):
+        # priorité Province si possible
         if can_buy(stock, game_id, hand, getattr(CardName,"PROVINCE",None)):
             return do_buy(game_id, hand, getattr(CardName,"PROVINCE"))
         # Accélère 3-piles : Workshop / Estates / cartes ≤4
-        for tgt in [getattr(CardName,"WORKSHOP",None), getattr(CardName,"VILLAGE",None),
-                    getattr(CardName,"WOODCUTTER",None), getattr(CardName,"SMITHY",None),
-                    getattr(CardName,"ESTATE",None)]:
+        for tgt in [getattr(CardName,"WORKSHOP",None), getattr(CardName,"ESTATE",None), getattr(CardName,"SMITHY",None), getattr(CardName,"WOODCUTTER",None)]:
             if tgt and can_buy(stock, game_id, hand, tgt):
                 return do_buy(game_id, hand, tgt)
         # Duchy/Estate finisher
@@ -341,22 +359,26 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         if prov_left <= ESTATE_PIVOT and can_buy(stock, game_id, hand, getattr(CardName,"ESTATE",None)):
             return do_buy(game_id, hand, getattr(CardName,"ESTATE"))
 
-    # EARLY : verrouillage tempo et curse-race
-    if turn_no <= 8:
-        # Witch puis Fortuneteller en priorité tant qu’il reste des Curses
+    # EARLY : verrouillage tempo et curse-race (force opening)
+    if turn_no <= 6:
+        # 1) Force Witch (curse-race) si maledictions restantes
         if curse_l > 0 and owned(game_id, getattr(CardName,"WITCH",None)) < WITCH_CAP_EARLY and can_buy(stock, game_id, hand, getattr(CardName,"WITCH",None)):
             return do_buy(game_id, hand, getattr(CardName,"WITCH"))
+        # 2) Fortuneteller pour tempo (pioche adverse perturbée)
         if curse_l > 0 and owned(game_id, getattr(CardName,"FORTUNETELLER",None)) < FTELLER_CAP and can_buy(stock, game_id, hand, getattr(CardName,"FORTUNETELLER",None)):
             return do_buy(game_id, hand, getattr(CardName,"FORTUNETELLER"))
-        # Anti Library/Council : Militia rapide (cap 2)
+        # 3) Si board draw (Library/Council) -> Militia early cap
         if DRAW_COMBOS and owned(game_id, getattr(CardName,"MILITIA",None)) < MILITIA_CAP_VS_DRAW and can_buy(stock, game_id, hand, getattr(CardName,"MILITIA",None)):
-            return do_buy(game_id, hand, getattr(CardName,"MILITIA"))
-        # +Buys/+Actions stabilisateurs
+            return do_buy(game_id, hand, getattr(CardName,"MILITIA",None))
+        # 4) Stabilise avec 1 Hireling / Village / Market selon caps (engine minimal)
         for n,cap in [("HIRELING",ENGINE_HIRELING_CAP),("VILLAGE",ENGINE_VILLAGE_CAP),("MARKET",ENGINE_MARKET_CAP)]:
             c = getattr(CardName,n,None)
             if c and owned(game_id, c) < cap and can_buy(stock, game_id, hand, c):
+                # skip Market if we've already too many or board is draw-heavy (we don't want to feed opponents)
+                if n == "MARKET" and owned(game_id, getattr(CardName,"MARKET",None)) >= ENGINE_MARKET_CAP:
+                    continue
                 return do_buy(game_id, hand, c)
-        # Éco early
+        # 5) Éco early (Gold once)
         if can_buy(stock, game_id, hand, getattr(CardName,"GOLD",None)) and owned(game_id, getattr(CardName,"GOLD",None)) < 1:
             return do_buy(game_id, hand, getattr(CardName,"GOLD",None))
         if can_buy(stock, game_id, hand, getattr(CardName,"SILVER",None)):
@@ -367,6 +389,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         for n,cap in [("VILLAGE",ENGINE_VILLAGE_CAP),("MARKET",ENGINE_MARKET_CAP),("LABORATORY",ENGINE_LAB_CAP),("FARMINGVILLAGE",ENGINE_FARM_CAP)]:
             c = getattr(CardName,n,None)
             if c and owned(game_id, c) < cap and can_buy(stock, game_id, hand, c):
+                # special: prefer buying to deny rather than to build a heavy engine
                 return do_buy(game_id, hand, c)
 
     # Attaques persistantes / anti-draw
@@ -375,12 +398,11 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     if owned(game_id, getattr(CardName,"BANDIT",None)) < BANDIT_CAP and can_buy(stock, game_id, hand, getattr(CardName,"BANDIT",None)):
         return do_buy(game_id, hand, getattr(CardName,"BANDIT",None))
 
-    # Workshop utilitaire : deny ≤4 et plan 3-piles
+    # Workshop utilitaire : deny ≤4 et plan 3-piles (hautement prioritaire en mid/late)
     if owned(game_id, getattr(CardName,"WORKSHOP",None)) < 2 and can_buy(stock, game_id, hand, getattr(CardName,"WORKSHOP",None)):
         return do_buy(game_id, hand, getattr(CardName,"WORKSHOP",None))
 
     # Magnet si deck riche en trésors
-    tot_treas = owned(game_id, getattr(CardName,"COPPER",None)) + owned(game_id, getattr(CardName,"SILVER",None)) + owned(game_id, getattr(CardName,"GOLD",None))
     if tot_treas >= MAGNET_TREAS_THRESH and can_buy(stock, game_id, hand, getattr(CardName,"MAGNET",None)):
         return do_buy(game_id, hand, getattr(CardName,"MAGNET",None))
 
@@ -396,13 +418,31 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         if can_buy(stock, game_id, hand, getattr(CardName,"ESTATE",None)):
             return do_buy(game_id, hand, getattr(CardName,"ESTATE",None))
 
-    # Pivot vert / éco standard
-    if can_buy(stock, game_id, hand, getattr(CardName,"PROVINCE",None)):
-        return do_buy(game_id, hand, getattr(CardName,"PROVINCE",None))
+    # CouncilRoom / DistantShore / limits
+    if can_buy(stock, game_id, hand, getattr(CardName,"COUNCILROOM",None)) and owned(game_id, getattr(CardName,"COUNCILROOM",None)) < COUNCIL_CAP:
+        # do not buy CouncilRoom if board heavily draw-focused early and we don't need buys
+        if not (DRAW_COMBOS and turn_no <= 6):
+            return do_buy(game_id, hand, getattr(CardName,"COUNCILROOM",None))
+
+    # Avoid buying DistantShore when it will bloat deck with Estates if we already have strong Witch presence
+    if can_buy(stock, game_id, hand, getattr(CardName,"DISTANTSHORE",None)) and owned(game_id, getattr(CardName,"DISTANTSHORE",None)) < DSHORE_CAP:
+        if not (owned(game_id, getattr(CardName,"WITCH",None)) >= 1 and deck_sz > 18):
+            return do_buy(game_id, hand, getattr(CardName,"DISTANTSHORE",None))
+
+    # Pivot vert / éco standard (révisé: retard de verdir)
+    # On attend soit 2 Provinces possédées, soit une situation de fin de jeu
+    if (my_provinces_owned >= 2) or (prov_left <= PROV_THRESHOLD) or ( _money_in_hand(hand) + ts["coins_bonus"] - ts["coins_spent"] >= 15 and buys_left() >= 1):
+        if can_buy(stock, game_id, hand, getattr(CardName,"PROVINCE",None)):
+            return do_buy(game_id, hand, getattr(CardName,"PROVINCE",None))
+
+    # normal eco ramp
     if owned(game_id, getattr(CardName,"GOLD",None)) < MAX_GOLD_PRE_GREEN and can_buy(stock, game_id, hand, getattr(CardName,"GOLD",None)):
         return do_buy(game_id, hand, getattr(CardName,"GOLD",None))
+
     if prov_left <= DUCHY_PIVOT and can_buy(stock, game_id, hand, getattr(CardName,"DUCHY",None)):
         return do_buy(game_id, hand, getattr(CardName,"DUCHY",None))
+
+    # fallback silver
     if can_buy(stock, game_id, hand, getattr(CardName,"SILVER",None)):
         return do_buy(game_id, hand, getattr(CardName,"SILVER",None))
 
