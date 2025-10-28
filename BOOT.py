@@ -199,6 +199,27 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     if target_monty:
         print(f"[play] game={game_id} TARGET MODE: Monty_Python_Test detected -> activating counter strategy")
 
+        # Anti-miroir : switch plus tôt vers le scoring
+        if can_buy(CardName.PROVINCE):
+            return do_buy(CardName.PROVINCE)
+        if can_buy(CardName.DUCHY):
+            return do_buy(CardName.DUCHY)
+
+        # Vol des pièces maîtresses de l'engine
+        steal_priority = [
+            CardName.VILLAGE, CardName.MARKET, CardName.WITCH,
+            CardName.GOLD, CardName.HIRELING, CardName.LABORATORY, CardName.SMITHY
+        ]
+        for c in steal_priority:
+            if can_buy(c):
+                return do_buy(c)
+
+        # Fallback
+        if can_buy(CardName.SILVER):
+            return do_buy(CardName.SILVER)
+        return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+
+
     # --------------------
     # PHASE ACTION (only if actions > 0)
     # --------------------
