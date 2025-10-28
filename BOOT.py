@@ -1,4 +1,3 @@
-# BOOT_RHUM_RUIN_V1.py
 import html
 import threading
 from pathlib import Path
@@ -164,12 +163,6 @@ GameIdDependency = Annotated[str, Depends(get_game_id)]
 def unknown_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
     print(exc.__class__.__name__, str(exc))
     return JSONResponse(status_code=500, content={"message":"Oops!","detail":str(exc),"name":exc.__class__.__name__})
-
-@app.get("/", response_class=HTMLResponse)
-def root() -> str:
-    header = "<html><head><title>Rhum & Ruin</title></head><body><h1>Rhum & Ruin</h1><pre>"
-    footer = "</pre></body></html>"
-    return header + html.escape(Path(__file__).read_text(encoding="utf-8")) + footer
 
 @app.get("/name")
 def name() -> str:
