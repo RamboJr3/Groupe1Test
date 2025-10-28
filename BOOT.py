@@ -173,63 +173,71 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         return hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3
     def money_available() -> int:
         return money_treasures() + ts["coins_bonus"] - ts["coins_spent"]
+
     def can_buy(c: CardName) -> bool:
-        return ts["buys"] > 0 and stock.get(c, 0) and money_available() >= COST.get(c, 9999)
+        return ts["buys"] > 0 and stock.get(c, 0, ) and money_available() >= COST.get(c, 9999)
+
     def do_buy(c: CardName) -> DopynionResponseStr:
+        cost = COST.get(c, 0)
         ts["buys"] -= 1
-        ts["coins_spent"] += COST.get(c, 0)
+        ts["coins_spent"] += cost
         inc_owned(game_id, c)
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
 
-    target_monty = any("monty_python_test" in (getattr(p, "name", "") or "").lower() for p in game.players if p is not me)
+    # Étape 2.1 — Classification automatique du type de partie
+    action_cards = {CardName.FESTIVAL, CardName.LABORATORY, CardName.VILLAGE, CardName.WOODCUTTER,
+                    CardName.MARKET, CardName.HIRELING, CardName.SMITHY}
+    draw_cards = {CardName.LABORATORY, CardName.SMITHY, CardName.WITCH, CardName.HIRELING, CardName.MARKET}
+    attack_cards = {CardName.WITCH, CardName.MILITIA, CardName.BUREAUCRAT}  # BUREAUCRAT manquant du stock ? à vérifier
 
-    # --- Nouvelle stratégie : SPAM ECON + STACK HIRELING pour tempo indéfinie et rush province massive ---
-    if target_monty:
-        # --- Phase Action ---
-        if ts["actions"] > 0:
-            for a in [CardName.MARKET, CardName.LABORATORY, CardName.VILLAGE, CardName.HIRELING, CardName.FESTIVAL, CardName.SMITHY]:
-                if hq(a) > 0 and a.name in EFFECTS:
-                    acts, buys, coins, _ = EFFECTS[a.name]
-                    ts["actions"] -= 1
-                    ts["actions"] += acts
-                    ts["buys"] += buys
-                    ts["coins_bonus"] += coins
-                    return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
+    reserve = set(stock.keys())
 
-        # --- Phase Achat ---
-        buy_order = [
-            CardName.HIRELING,     # objectif = 3+ recrues
-            CardName.LABORATORY,   # draw massif
-            CardName.MARKET,       # +buy +cycle +money
-            CardName.GOLD,         # économie brute
-            CardName.PROVINCE,     # dès que possible
-            CardName.FESTIVAL,
-            CardName.VILLAGE,
-            CardName.SILVER
-        ]
-        for c in buy_order:
-            if can_buy(c):
+    has_plus_action = any(c in reserve for c in action_cards)
+    has_draw = any(c in reserve for c in draw_cards)
+    has_attack = any(c in reserve for c in attack_cards)
+
+    if has_plus_action and has_draw:
+        game_type = "engine"
+    elif not has_plus_action:
+        game_type = "money"
+    elif has_attack:
+        game_type = "attack"
+    else:
+        game_type = "hybrid"
+
+    print(f"[play] game_type={game_type}")
+
+    # Choix de la stratégie
+    if game_type == "money":
+        # STRATÉGIE BIG MONEY
+        turn_no = SESS[game_id].get("turn", 1)
+        treasure = money_available()
+
+        if treasure >= 8 and can_buy(CardName.PROVINCE):
+            return do_buy(CardName.PROVINCE)
+        if turn_no >= 6 and treasure >= 5 and can_buy(CardName.DUCHY):
+            return do_buy(CardName.DUCHY)
+        if turn_no >= 10 and treasure >= 2 and can_buy(CardName.ESTATE):
+            return do_buy(CardName.ESTATE)
+        if treasure >= 6 and can_buy(CardName.GOLD):
+            return do_buy(CardName.GOLD)
+        silver_count = owned(game_id, CardName.SILVER)
+        if silver_count < 2 and treasure >= 3 and can_buy(CardName.SILVER):
+            return do_buy(CardName.SILVER)
+
+        terminal_actions = [CardName.MILITIA, CardName.BANDIT, CardName.WITCH, CardName.WOODCUTTER]
+        for c in terminal_actions:
+            if treasure >= COST.get(c, 999) and can_buy(c):
                 return do_buy(c)
+
+        if can_buy(CardName.SILVER):
+            return do_buy(CardName.SILVER)
 
         return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
-    # --- fallback non-target ---
-    if ts["actions"] > 0:
-        for a in [CardName.LABORATORY, CardName.VILLAGE, CardName.MARKET, CardName.SMITHY, CardName.FESTIVAL]:
-            if hq(a) > 0 and a.name in EFFECTS:
-                acts, buys, coins, _ = EFFECTS[a.name]
-                ts["actions"] -= 1
-                ts["actions"] += acts
-                ts["buys"] += buys
-                ts["coins_bonus"] += coins
-                return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
-
-    # achats par défaut
-    for c in [CardName.PROVINCE, CardName.HIRELING, CardName.LABORATORY, CardName.MARKET, CardName.GOLD, CardName.SILVER]:
-        if can_buy(c):
-            return do_buy(c)
-
+    # Si ce n'est pas une money game, ici on pourra intégrer Engine / Hybrid / Attack plus tard
     return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+
 
 
 
