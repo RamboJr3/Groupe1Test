@@ -159,281 +159,77 @@ DOUBLE_PROVINCE_BUYS = 2      # si on a >= buys pour tenter double achat
 
 @app.post("/play")
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
-    # --- trouver "moi" ---
     me = next((p for p in game.players if p.hand is not None), None)
     if not me or not me.hand:
-        print(f"[play] game={game_id} no visible hand -> END_TURN")
         return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
-    hand = me.hand.quantities        # dict[CardName,int]
-    stock = game.stock.quantities    # dict[CardName,int]
+    hand = me.hand.quantities
+    stock = game.stock.quantities
     ts = get_turn_state(game_id)
 
-    # helpers
     def hq(c: CardName) -> int: return hand.get(c, 0)
     def in_stock(c: CardName) -> bool: return stock.get(c, 0) > 0
     def money_treasures() -> int:
         return hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3
     def money_available() -> int:
         return money_treasures() + ts["coins_bonus"] - ts["coins_spent"]
+    def can_buy(c: CardName) -> bool:
+        return ts["buys"] > 0 and stock.get(c, 0) and money_available() >= COST.get(c, 9999)
+    def do_buy(c: CardName) -> DopynionResponseStr:
+        ts["buys"] -= 1
+        ts["coins_spent"] += COST.get(c, 0)
+        inc_owned(game_id, c)
+        return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
 
-    # basic info
-    prov_left = stock.get(CardName.PROVINCE, 0)
-    my_score = getattr(me, "score", 0) or 0
-    max_opponent_score = max((getattr(p, "score", 0) or 0) for p in game.players if p is not me) if game.players else 0
+    target_monty = any("monty_python_test" in (getattr(p, "name", "") or "").lower() for p in game.players if p is not me)
 
-    # quick deck_estimate from visible hand (cheap heuristic)
-    actions_in_hand = sum(1 for c in hand if c not in (CardName.COPPER, CardName.SILVER, CardName.GOLD,
-                                                       CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE, CardName.CURSE) and hand[c] > 0)
-    treasure_value = money_treasures()
-
-    print(f"[play] game={game_id} start | actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']} spent={ts['coins_spent']} "
-          f"treasure={treasure_value} actions_in_hand={actions_in_hand} prov_left={prov_left} my_score={my_score} max_opp={max_opponent_score}")
-
-    # --- Detect target player Monty_Python_Test ---
-    target_monty = any(
-        "monty_python_test" in (getattr(p, "name", "") or "").lower()
-        for p in game.players
-        if p is not me
-    )
+    # --- Nouvelle stratégie : SPAM ECON + STACK HIRELING pour tempo indéfinie et rush province massive ---
     if target_monty:
-        print(f"[play] game={game_id} TARGET MODE: Monty_Python_Test detected -> activating counter strategy")
+        # --- Phase Action ---
+        if ts["actions"] > 0:
+            for a in [CardName.MARKET, CardName.LABORATORY, CardName.VILLAGE, CardName.HIRELING, CardName.FESTIVAL, CardName.SMITHY]:
+                if hq(a) > 0 and a.name in EFFECTS:
+                    acts, buys, coins, _ = EFFECTS[a.name]
+                    ts["actions"] -= 1
+                    ts["actions"] += acts
+                    ts["buys"] += buys
+                    ts["coins_bonus"] += coins
+                    return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
 
-        # Anti-miroir : switch plus tôt vers le scoring
-        if can_buy(CardName.PROVINCE):
-            return do_buy(CardName.PROVINCE)
-        if can_buy(CardName.DUCHY):
-            return do_buy(CardName.DUCHY)
-
-        # Vol des pièces maîtresses de l'engine
-        steal_priority = [
-            CardName.VILLAGE, CardName.MARKET, CardName.WITCH,
-            CardName.GOLD, CardName.HIRELING, CardName.LABORATORY, CardName.SMITHY
+        # --- Phase Achat ---
+        buy_order = [
+            CardName.HIRELING,     # objectif = 3+ recrues
+            CardName.LABORATORY,   # draw massif
+            CardName.MARKET,       # +buy +cycle +money
+            CardName.GOLD,         # économie brute
+            CardName.PROVINCE,     # dès que possible
+            CardName.FESTIVAL,
+            CardName.VILLAGE,
+            CardName.SILVER
         ]
-        for c in steal_priority:
+        for c in buy_order:
             if can_buy(c):
                 return do_buy(c)
 
-        # Fallback
-        if can_buy(CardName.SILVER):
-            return do_buy(CardName.SILVER)
         return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
-
-    # --------------------
-    # PHASE ACTION (only if actions > 0)
-    # --------------------
+    # --- fallback non-target ---
     if ts["actions"] > 0:
-        # If target present, play disruptive actions first (if available in hand)
-        if target_monty:
-            # priority for disruption when target present
-            target_action_priority = [
-                "WITCH",
-                "FORTUNETELLER",
-                "MILITIA",
-                "BUREAUCRAT",
-                "COUNCIL_ROOM",
-                "BANDIT",
-                "FARMING_VILLAGE",
-                "HIRELING",
-            ]
-            for name in target_action_priority:
-                if name in CardName.__members__:
-                    a = CardName[name]
-                    if hq(a) > 0:
-                        # apply EFFECTS if known, else consume an action and return play
-                        if a.name in EFFECTS:
-                            acts, buys, coins, _ = EFFECTS[a.name]
-                            ts["actions"] -= 1
-                            ts["actions"] += acts
-                            ts["buys"] += buys
-                            ts["coins_bonus"] += coins
-                            print(f"[play] ACTION (target) {a.name} applied -> +acts={acts} +buys={buys} +$={coins} => actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}")
-                            return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
-                        else:
-                            # generic play of an action we don't have effects for
-                            ts["actions"] -= 1
-                            print(f"[play] ACTION (target) {a.name} (no EFFECTS defined) -> actions={ts['actions']}")
-                            return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
-
-        # Default non-target behaviour: existing action priority (engine-friendly)
-        action_priority = [
-            CardName.MARKET,     # +1 carte, +1 action, +1 buy, +1$
-            CardName.LABORATORY, # +2 cartes, +1 action
-            CardName.VILLAGE,    # +2 actions, +1 carte
-            CardName.FESTIVAL,   # +2 actions, +1 buy, +2$
-            CardName.HIRELING,   # terminal
-            CardName.WITCH,      # terminal (attack)
-            CardName.SMITHY,     # terminal
-            CardName.WOODCUTTER, # terminal
-        ]
-        for a in action_priority:
+        for a in [CardName.LABORATORY, CardName.VILLAGE, CardName.MARKET, CardName.SMITHY, CardName.FESTIVAL]:
             if hq(a) > 0 and a.name in EFFECTS:
                 acts, buys, coins, _ = EFFECTS[a.name]
                 ts["actions"] -= 1
                 ts["actions"] += acts
                 ts["buys"] += buys
                 ts["coins_bonus"] += coins
-                print(f"[play] ACTION {a.name} applied -> +acts={acts} +buys={buys} +$={coins} => actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}")
                 return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
 
-    # --------------------
-    # Decide mode: engine-first or aggressive Duchy-steal (non-target fallback)
-    # --------------------
-    aggressive_mode = False
-    if prov_left <= PROV_THRESHOLD:
-        aggressive_mode = True
-    if (max_opponent_score - my_score) >= SCORE_DELTA:
-        aggressive_mode = True
+    # achats par défaut
+    for c in [CardName.PROVINCE, CardName.HIRELING, CardName.LABORATORY, CardName.MARKET, CardName.GOLD, CardName.SILVER]:
+        if can_buy(c):
+            return do_buy(c)
 
-    engine_ready = (money_available() >= ENGINE_PROVINCE_MONEY) or (treasure_value + ts["coins_bonus"] >= 8 and ts["buys"] >= 1)
-
-    print(f"[play] mode decision -> aggressive={aggressive_mode} engine_ready={engine_ready} money_avail={money_available()} target_monty={target_monty}")
-
-    # --------------------
-    # PHASE ACHAT
-    # --------------------
-    def can_buy(c: CardName) -> bool:
-        return ts["buys"] > 0 and stock.get(c, 0) and money_available() >= COST.get(c, 9999)
-
-    def do_buy(c: CardName) -> DopynionResponseStr:
-        cost = COST.get(c, 0)
-        ts["buys"] -= 1
-        ts["coins_spent"] += cost
-        inc_owned(game_id, c)
-        print(f"[buy] BUY {c.name} cost={cost} -> buys_left={ts['buys']} spent={ts['coins_spent']} avail_now={money_available()}")
-        return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
-
-    if ts["buys"] > 0:
-        turn_no = SESS[game_id].get("turn", 1)
-        enemy_alive = any("equipe3" in (getattr(p, "name", "") or "").lower() for p in game.players)
-
-        vg_cnt  = owned(game_id, CardName.VILLAGE)
-        mk_cnt  = owned(game_id, CardName.MARKET)
-        sm_cnt  = owned(game_id, CardName.SMITHY)
-        wt_cnt  = owned(game_id, CardName.WITCH)
-        lab_cnt = owned(game_id, CardName.LABORATORY)
-        gd_cnt  = owned(game_id, CardName.GOLD)
-        rc_cnt  = owned(game_id, CardName.HIRELING)
-
-        prov_left     = stock.get(CardName.PROVINCE, 0)
-        curses_left   = stock.get(CardName.CURSE, 0) if CardName.CURSE in stock else 0
-        villages_left = stock.get(CardName.VILLAGE, 0) if CardName.VILLAGE in stock else 0
-        AGGRO_DUCHY   = (prov_left <= 4) or ((max_opponent_score - my_score) >= 4)
-
-        print(f"[buy] t={turn_no} $={money_available()} prov={prov_left} curses={curses_left} "
-            f"owned: RC={rc_cnt} VG={vg_cnt} MK={mk_cnt} LAB={lab_cnt} WT={wt_cnt} SM={sm_cnt} GOLD={gd_cnt} "
-            f"villages_left={villages_left} aggro_duchy={AGGRO_DUCHY} enemy_alive={enemy_alive} target_monty={target_monty}")
-
-        # ---------- TARGET-MODE: full sabotage (prioritise attacks, deny useful cards) ----------
-        if target_monty:
-            # order of cards (strings) we want to buy ASAP to cripple Monty
-            target_buy_order = [
-                "WITCH",
-                "FORTUNETELLER",
-                "MILITIA",
-                "BUREAUCRAT",
-                "COUNCIL_ROOM",
-                "BANDIT",
-                "LIBRARY",
-                "FARMING_VILLAGE",
-                "HIRELING",
-                "MARKET",   # buy to deny opponent
-                "VILLAGE",  # buy to deny opponent
-                "SMITHY",
-                "DISTRUCTIVE_PLACEHOLDER"  # placeholder if you add more
-            ]
-            # Try to buy in order if card exists in CardName enum and in stock / affordable
-            for cname in target_buy_order:
-                if cname in CardName.__members__:
-                    c = CardName[cname]
-                    if can_buy(c):
-                        return do_buy(c)
-
-            # If nothing above, aggressively buy any non-treasure non-victory card to bloat enemy
-            for member_name in CardName.__members__:
-                if member_name in ("COPPER", "SILVER", "GOLD", "PROVINCE", "DUCHY"):
-                    continue
-                c = CardName[member_name]
-                if can_buy(c):
-                    return do_buy(c)
-
-            # fallback: buy a Silver if absolutely nothing else
-            if CardName.SILVER in CardName.__members__ and can_buy(CardName.SILVER):
-                return do_buy(CardName.SILVER)
-
-            # no buy possible
-            print("[buy] target mode: nothing affordable -> END_TURN")
-            return DopynionResponseStr(game_id=game_id, decision="END_TURN")
-
-        # ---------- NON-TARGET (existing logic, simplified but preserved) ----------
-        # 0) Province if possible (always)
-        if can_buy(CardName.PROVINCE):
-            return do_buy(CardName.PROVINCE)
-
-        # 1) EARLY GAME — install HIRELING and engine
-        if turn_no <= 8:
-            if curses_left > 0 and wt_cnt < 1 and can_buy(CardName.WITCH):
-                return do_buy(CardName.WITCH)
-            if can_buy(CardName.HIRELING) and rc_cnt < 2:
-                return do_buy(CardName.HIRELING)
-            if can_buy(CardName.MARKET) and mk_cnt < 2:
-                return do_buy(CardName.MARKET)
-            if can_buy(CardName.GOLD) and gd_cnt < 1:
-                return do_buy(CardName.GOLD)
-            if can_buy(CardName.SILVER):
-                return do_buy(CardName.SILVER)
-
-        # MID GAME
-        if curses_left > 0:
-            cap_witch = 3 if (enemy_alive and villages_left <= 7) else 2
-            if can_buy(CardName.WITCH) and wt_cnt < cap_witch:
-                return do_buy(CardName.WITCH)
-            if can_buy(CardName.MARKET) and mk_cnt < 2:
-                return do_buy(CardName.MARKET)
-            if can_buy(CardName.LABORATORY) and lab_cnt < 2:
-                return do_buy(CardName.LABORATORY)
-            if can_buy(CardName.HIRELING) and rc_cnt < 3:
-                return do_buy(CardName.HIRELING)
-            if enemy_alive and villages_left > 0 and vg_cnt < 2 and can_buy(CardName.VILLAGE):
-                return do_buy(CardName.VILLAGE)
-
-        # convert advantage into points / tempo
-        if curses_left == 0 and enemy_alive and villages_left <= 2:
-            if can_buy(CardName.PROVINCE):
-                return do_buy(CardName.PROVINCE)
-            if AGGRO_DUCHY and can_buy(CardName.DUCHY):
-                return do_buy(CardName.DUCHY)
-
-        # Standard fallback plan
-        if can_buy(CardName.PROVINCE):
-            return do_buy(CardName.PROVINCE)
-        if AGGRO_DUCHY and can_buy(CardName.DUCHY):
-            return do_buy(CardName.DUCHY)
-        if can_buy(CardName.HIRELING) and rc_cnt < 3:
-            return do_buy(CardName.HIRELING)
-        if can_buy(CardName.GOLD) and gd_cnt < 2:
-            return do_buy(CardName.GOLD)
-        if can_buy(CardName.MARKET) and mk_cnt < 2:
-            return do_buy(CardName.MARKET)
-        if can_buy(CardName.LABORATORY) and lab_cnt < 2:
-            return do_buy(CardName.LABORATORY)
-        if curses_left > 0 and can_buy(CardName.WITCH) and wt_cnt < 2:
-            return do_buy(CardName.WITCH)
-        if can_buy(CardName.SMITHY) and (vg_cnt + mk_cnt) >= 1 and sm_cnt < 2:
-            return do_buy(CardName.SMITHY)
-        if can_buy(CardName.SILVER):
-            return do_buy(CardName.SILVER)
-        if can_buy(CardName.DUCHY):
-            return do_buy(CardName.DUCHY)
-        if turn_no > 10 and can_buy(CardName.ESTATE):
-            return do_buy(CardName.ESTATE)
-
-    # nothing to do
-    print(f"[play] nothing to do -> END_TURN | state actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']} spent={ts['coins_spent']}")
     return DopynionResponseStr(game_id=game_id, decision="END_TURN")
-
-
 
 
 
