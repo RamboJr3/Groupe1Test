@@ -146,7 +146,7 @@ def unknown_exception_handler(_request: Request, exc: Exception) -> JSONResponse
 
 @app.get("/name")
 def name() -> str:
-    return "Rhum & ruin"
+    return "Monty_Ruin"
 
 
 @app.get("/start_game")
