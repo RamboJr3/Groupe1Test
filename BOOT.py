@@ -243,6 +243,11 @@ def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
 # STRATÉGIE PRINCIPALE : RUSH ~10 TOURS
 #####################################################
 
+# --- Paramètres globaux de la strat WitchLockdown (comme dans le ref) ---
+PROV_THRESHOLD = 4            # nombre de Provinces restantes pour passer en mode agressif
+SCORE_DELTA = 4               # retard/avance de score pour basculer l’agressivité
+ENGINE_PROVINCE_MONEY = 12    # seuil de "puissance éco" pour considérer le moteur "online"
+DOUBLE_PROVINCE_BUYS = 2      # nombre de buys permettant double Province
 
 @app.post("/play")
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
