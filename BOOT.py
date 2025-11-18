@@ -338,135 +338,98 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         f"owned: WITCH={wt_cnt} REMAKE={remake_cnt} GARDENS={gardens_cnt} "
         f"MAGPIE={magpie_cnt} PORT={port_cnt} cards~={estimated_total_cards}"
     )
+    # --- FIX ACTIONS : détection correcte des cartes en main
+    def has_in_hand(card: CardName) -> bool:
+        return hand.get(card, 0) > 0
+
+    # --- Nouvelle evaluation eco
+    def econ_strength() -> int:
+        return (
+            owned_local.get(CardName.SILVER, 0) * 2 +
+            owned_local.get(CardName.GOLD, 0) * 3 +
+            owned_local.get(getattr(CardName, "CURSED_GOLD", None), 0) * 3
+        )
+
+    # --- Nouveau trash intelligent
+    def should_trash_estate() -> bool:
+        return turn_no <= 10 and remake_cnt > 0
+
+    def should_trash_copper() -> bool:
+        return econ_strength() >= 6 and turn_no >= 5
 
     # --------------------
-    # PHASE ACTION : priorité aux attaques / draw utiles
+    # PHASE ACTION améliorée
     # --------------------
     if ts["actions"] > 0:
-        action_priority: list[CardName] = []
-
-        # Core attaques / draw
-        action_priority.append(CardName.WITCH)
-        if hasattr(CardName, "MILITIA"):
-            action_priority.append(CardName.MILITIA)
-        if hasattr(CardName, "COUNCIL_ROOM"):
-            action_priority.append(CardName.COUNCIL_ROOM)
-
-        # Draw brut / cantrips
-        action_priority.append(CardName.SMITHY)
-        if hasattr(CardName, "HARVEST"):
-            action_priority.append(CardName.HARVEST)
-        if hasattr(CardName, "MAG_PIE"):
-            action_priority.append(CardName.MAG_PIE)
-        if hasattr(CardName, "PORT"):
-            action_priority.append(CardName.PORT)
-
-        # Moteur léger (sans overbuild)
-        action_priority.append(CardName.MARKET)
-        action_priority.append(CardName.FESTIVAL)
-        action_priority.append(CardName.LABORATORY)
-        if hasattr(CardName, "FARMING_VILLAGE"):
-            action_priority.append(CardName.FARMING_VILLAGE)
-        action_priority.append(CardName.VILLAGE)
-        action_priority.append(CardName.WOODCUTTER)
-
-        # Support
-        if hasattr(CardName, "ARTIFICER"):
-            action_priority.append(CardName.ARTIFICER)
-        if hasattr(CardName, "MARQUIS"):
-            action_priority.append(CardName.MARQUIS)
-        if hasattr(CardName, "POACHER"):
-            action_priority.append(CardName.POACHER)
-        action_priority.append(CardName.HIRELING)
-        if hasattr(CardName, "BANDIT"):
-            action_priority.append(CardName.BANDIT)
-        if hasattr(CardName, "BUREAUCRAT"):
-            action_priority.append(CardName.BUREAUCRAT)
-        if hasattr(CardName, "CHANCELLOR"):
-            action_priority.append(CardName.CHANCELLOR)
-        if hasattr(CardName, "DISTANT_SHORE"):
-            action_priority.append(CardName.DISTANT_SHORE)
-        if remake_card:
-            action_priority.append(remake_card)
+        # Priorité : draw > attaques > moteurs > support
+        action_priority = [
+            CardName.LABORATORY,
+            CardName.SMITHY,
+            getattr(CardName, "MARQUIS", None),
+            getattr(CardName, "MAG_PIE", None),
+            getattr(CardName, "PORT", None),
+            CardName.VILLAGE,
+            CardName.MARKET,
+            CardName.FESTIVAL,
+            CardName.WITCH,
+            getattr(CardName, "MILITIA", None),
+            getattr(CardName, "COUNCIL_ROOM", None),
+            getattr(CardName, "FARMING_VILLAGE", None),
+            getattr(CardName, "HARVEST", None),
+            getattr(CardName, "ARTIFICER", None),
+            getattr(CardName, "POACHER", None),
+            getattr(CardName, "CHANCELLOR", None),
+            getattr(CardName, "DISTANT_SHORE", None),
+            remake_card,
+            CardName.HIRELING,
+        ]
 
         for a in action_priority:
-            if a in hand and a.name in EFFECTS and ts["actions"] > 0:
+            if a and has_in_hand(a) and a.name in EFFECTS:
                 acts, buys, coins, _draw = EFFECTS[a.name]
                 ts["actions"] -= 1
                 ts["actions"] += acts
                 ts["buys"] += buys
                 ts["coins_bonus"] += coins
-                print(
-                    f"[play] ACTION {a.name} -> +acts={acts} +buys={buys} +$={coins} "
-                    f"=> actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}"
-                )
+                print(f"[play] ACTION {a.name}")
                 return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
 
+
     # --------------------
-    # PHASE ACHAT : HYPER RUSH
-    # Objectif : 3 piles vides rapidement (Curse + Gardens + Port/MagPie/Duchy),
-    # en restant devant en PV.
+    # PHASE ACHAT améliorée
     # --------------------
     if ts["buys"] > 0:
-        behind = (max_opp_score - my_score) >= 2
-        colony_in_game = colony_card is not None and colony_left > 0
 
-        # 1) Colonies / Provinces -> accélère la fin si on a l'éco
-        if colony_in_game and can_buy(colony_card):
-            return do_buy(colony_card)
-        if can_buy(CardName.PROVINCE) and (turn_no >= 6 or prov_left <= 6):
+        # A) Province si économie correcte
+        if money_available() >= 8 and can_buy(CardName.PROVINCE):
             return do_buy(CardName.PROVINCE)
 
-        # 2) Witch tôt pour vider la pile de Curses + ralentir l'adversaire
-        if curses_left > 0 and wt_cnt < 2 and can_buy(CardName.WITCH) and turn_no <= 7:
-            return do_buy(CardName.WITCH)
-
-        # 3) Remake tôt pour gérer Curses / Estates
-        if remake_card and turn_no <= 5 and remake_cnt < 1 and can_buy(remake_card):
-            return do_buy(remake_card)
-
-        # 4) Gardens : alt-VP + pile facile à vider
-        if gardens_card and can_buy(gardens_card) and (
-            turn_no >= 4 or estimated_total_cards >= 15
-        ):
-            return do_buy(gardens_card)
-
-        # 5) Duchy agressif (pile VP intermédiaire)
-        if can_buy(CardName.DUCHY) and (
-            prov_left <= 4
-            or (colony_in_game and colony_left <= 4)
-            or turn_no >= 8
-            or behind
-        ):
-            return do_buy(CardName.DUCHY)
-
-        # 6) Ports : double gain, vide une pile très vite + cantrip
-        if port_card and can_buy(port_card):
-            return do_buy(port_card)
-
-        # 7) Mag Pie : swarm rapide, vide la pile et stabilise la pioche
-        if magpie_card and can_buy(magpie_card):
-            return do_buy(magpie_card)
-
-        # 8) Mid game : un Smithy max pour lisser les mains
-        if 5 <= turn_no <= 9 and can_buy(CardName.SMITHY) and sm_cnt < 1:
-            return do_buy(CardName.SMITHY)
-
-        # 9) Éco brute pour claquer rapidement Provinces / Colonies
+        # B) Gold avant tout (moteur éco)
         if can_buy(CardName.GOLD):
             return do_buy(CardName.GOLD)
+
+        # C) Witch early
+        if curses_left > 0 and wt_cnt < 2 and turn_no <= 8 and can_buy(CardName.WITCH):
+            return do_buy(CardName.WITCH)
+
+        # D) Laboratory > Smithy = draw core
+        if can_buy(CardName.LABORATORY):
+            return do_buy(CardName.LABORATORY)
+        if sm_cnt < 1 and can_buy(CardName.SMITHY):
+            return do_buy(CardName.SMITHY)
+
+        # E) Silver simple stabilisation
         if can_buy(CardName.SILVER):
             return do_buy(CardName.SILVER)
 
-        # 10) Estates en toute fin pour sécuriser / vider la pile
-        if turn_no >= 9 and can_buy(CardName.ESTATE):
+        # F) Defer Gardens rush jusqu'à econ stable
+        if gardens_card and econ_strength() >= 5 and can_buy(gardens_card):
+            return do_buy(gardens_card)
+
+        # G) Estates fin de partie
+        if prov_left <= 2 and can_buy(CardName.ESTATE):
             return do_buy(CardName.ESTATE)
 
-    print(
-        f"[play] game={game_id} nothing to do -> END_TURN | "
-        f"actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']} spent={ts['coins_spent']}"
-    )
-    return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
 
 #####################################################
