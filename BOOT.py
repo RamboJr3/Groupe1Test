@@ -16,23 +16,50 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-# --- ÉTAT DE TOUR ---
-SESS: dict[str, dict] = {}   # { game_id: {"actions": int, "buys": int, "coins_bonus": int, "coins_spent": int} }
+# --- ÉTAT DE TOUR / PARTIE ---
+# SESS[game_id] = {
+#   "actions": int, "buys": int, "coins_bonus": int, "coins_spent": int,
+#   "owned": {CardName: int}, "turn": int
+# }
+SESS: dict[str, dict] = {}
+
 
 def init_turn_state(game_id: str) -> None:
     SESS.setdefault(game_id, {"owned": {}, "turn": 0})
-    SESS[game_id].update({"actions": 1, "buys": 1, "coins_bonus": 0, "coins_spent": 0})
+    SESS[game_id].update(
+        {"actions": 1, "buys": 1, "coins_bonus": 0, "coins_spent": 0}
+    )
 
 
 def get_turn_state(game_id: str) -> dict:
-    return SESS.setdefault(game_id, {"actions": 1, "buys": 1, "coins_bonus": 0, "coins_spent": 0})
+    return SESS.setdefault(
+        game_id,
+        {
+            "actions": 1,
+            "buys": 1,
+            "coins_bonus": 0,
+            "coins_spent": 0,
+            "owned": {},
+            "turn": 0,
+        },
+    )
 
-# --- suivi du deck par partie (approx via achats) ---
-# SESS[game_id] = {"actions":..., "buys":..., "coins_bonus":..., "coins_spent":..., "owned": {CardName: int}}
+
 def inc_owned(game_id: str, card: CardName) -> None:
-    s = SESS.setdefault(game_id, {"actions":1,"buys":1,"coins_bonus":0,"coins_spent":0,"owned":{}})
-    s.setdefault("owned", {})
-    s["owned"][card] = s["owned"].get(card, 0) + 1
+    s = SESS.setdefault(
+        game_id,
+        {
+            "actions": 1,
+            "buys": 1,
+            "coins_bonus": 0,
+            "coins_spent": 0,
+            "owned": {},
+            "turn": 0,
+        },
+    )
+    o = s.setdefault("owned", {})
+    o[card] = o.get(card, 0) + 1
+
 
 def owned(game_id: str, card: CardName) -> int:
     s = SESS.get(game_id) or {}
@@ -40,20 +67,24 @@ def owned(game_id: str, card: CardName) -> int:
     return o.get(card, 0)
 
 
-# --- COÛTS MINIMAUX UTILISÉS (cartes jouables aujourd'hui) ---
+# --- COÛTS DES CARTES ---
 COST = {
-    # Trésors / Victoire classiques
+    # Trésors / Victoire
     CardName.COPPER: 0,
     CardName.SILVER: 3,
     CardName.GOLD: 6,
     CardName.ESTATE: 2,
     CardName.DUCHY: 5,
     CardName.PROVINCE: 8,
+    CardName.CURSE: 0,
 
     # Prosperity
-    CardName.COLONY: 11,      # 10 PV, fin de partie si pile vide (géré par l'arbitre)
+    getattr(CardName, "COLONY", None): 11 if hasattr(CardName, "COLONY") else None,
 
-    # Actions déjà utilisées
+    # Trésor spécial
+    getattr(CardName, "CURSED_GOLD", None): 4 if hasattr(CardName, "CURSED_GOLD") else None,
+
+    # Actions classiques
     CardName.FESTIVAL: 5,
     CardName.LABORATORY: 5,
     CardName.VILLAGE: 3,
@@ -63,28 +94,57 @@ COST = {
     CardName.WITCH: 5,
     CardName.HIRELING: 6,
 
-    # Nouvelles actions jouables par la strat
-    CardName.ARTIFICER: 5,    # +1 carte, +1 action, +1C, discard/gain gérés par l'arbitre
-    CardName.MARQUIS: 6,      # +1 achat, pioche massive gérée par l'arbitre
-    CardName.POACHER: 4,      # +1 carte, +1 action, +1C, discards par piles vides
+    # Actions déjà décrites
+    getattr(CardName, "COUNCIL_ROOM", None): 5 if hasattr(CardName, "COUNCIL_ROOM") else None,
+    getattr(CardName, "DISTANT_SHORE", None): 6 if hasattr(CardName, "DISTANT_SHORE") else None,
+    getattr(CardName, "FARMING_VILLAGE", None): 4 if hasattr(CardName, "FARMING_VILLAGE") else None,
+    getattr(CardName, "BANDIT", None): 5 if hasattr(CardName, "BANDIT") else None,
+    getattr(CardName, "BUREAUCRAT", None): 4 if hasattr(CardName, "BUREAUCRAT") else None,
+    getattr(CardName, "CHANCELLOR", None): 3 if hasattr(CardName, "CHANCELLOR") else None,
+    getattr(CardName, "GARDENS", None): 4 if hasattr(CardName, "GARDENS") else None,
+    getattr(CardName, "MILITIA", None): 4 if hasattr(CardName, "MILITIA") else None,
+
+    # Nouvelles actions
+    getattr(CardName, "ARTIFICER", None): 5 if hasattr(CardName, "ARTIFICER") else None,
+    getattr(CardName, "MARQUIS", None): 6 if hasattr(CardName, "MARQUIS") else None,
+    getattr(CardName, "POACHER", None): 4 if hasattr(CardName, "POACHER") else None,
+    getattr(CardName, "HARVEST", None): 5 if hasattr(CardName, "HARVEST") else None,
+    getattr(CardName, "MAG_PIE", None): 4 if hasattr(CardName, "MAG_PIE") else None,
+    getattr(CardName, "PORT", None): 4 if hasattr(CardName, "PORT") else None,
+    getattr(CardName, "REMAKE", None): 4 if hasattr(CardName, "REMAKE") else None,
 }
 
+# Nettoyage: enlever les clés None éventuelles
+COST = {k: v for k, v in COST.items() if k is not None}
 
-# --- EFFETS D'ACTIONS (actions, buys, coins_bonus, draw) ---
+# --- EFFETS D'ACTIONS (actions, buys, coins_bonus, draw théorique) ---
 EFFECTS: dict[str, tuple[int, int, int, int]] = {
-    "FESTIVAL":    (2, 1, 2, 0),
-    "LABORATORY":  (1, 0, 0, 2),
-    "VILLAGE":     (2, 0, 0, 1),
-    "WOODCUTTER":  (0, 1, 2, 0),
-    "SMITHY":      (0, 0, 0, 3),
-    "MARKET":      (1, 1, 1, 1),
-    "WITCH":       (0, 0, 0, 2),  # +2 cartes ; les Malédictions sont appliquées par l’arbitre
-    "HIRELING":    (0, 0, 0, 0),  # effet différé (géré par le moteur)
+    "FESTIVAL":       (2, 1, 2, 0),
+    "LABORATORY":     (1, 0, 0, 2),
+    "VILLAGE":        (2, 0, 0, 1),
+    "WOODCUTTER":     (0, 1, 2, 0),
+    "SMITHY":         (0, 0, 0, 3),
+    "MARKET":         (1, 1, 1, 1),
+    "WITCH":          (0, 0, 0, 2),
+    "HIRELING":       (0, 0, 0, 0),
 
-    # Nouvelles cartes
-    "ARTIFICER":   (1, 0, 1, 1),  # +1A, +1$, +1 carte ; discard/gain via callbacks
-    "MARQUIS":     (0, 1, 0, 0),  # +1 achat ; pioche/défausse gérées par l'arbitre
-    "POACHER":     (1, 0, 1, 1),  # +1A, +1$, +1 carte ; défausse via callbacks
+    # Attaques / draw
+    "COUNCIL_ROOM":   (0, 1, 0, 4),
+    "DISTANT_SHORE":  (1, 0, 0, 2),
+    "FARMING_VILLAGE":(2, 0, 0, 1),
+    "BANDIT":         (0, 0, 0, 0),
+    "BUREAUCRAT":     (0, 0, 0, 0),
+    "CHANCELLOR":     (0, 0, 2, 0),
+    "MILITIA":        (0, 0, 2, 0),
+
+    # Nouvelles actions
+    "ARTIFICER":      (1, 0, 1, 1),  # +1 carte, +1 action, +1$
+    "MARQUIS":        (0, 1, 0, 0),  # +1 buy, draw gérée par moteur
+    "POACHER":        (1, 0, 1, 1),  # +1 carte, +1 action, +1$
+    "HARVEST":        (0, 0, 0, 0),
+    "MAG_PIE":        (1, 0, 0, 1),  # cantrip
+    "PORT":           (1, 0, 0, 1),  # cantrip
+    "REMAKE":         (0, 0, 0, 0),
 }
 
 
@@ -138,40 +198,51 @@ def unknown_exception_handler(_request: Request, exc: Exception) -> JSONResponse
     )
 
 
+#####################################################
+# Static routes
+#####################################################
 
-#####################################################
-# The code of the strategy
-#####################################################
+
+@app.get("/", response_class=HTMLResponse)
+def root() -> str:
+    path = Path(__file__).parent / "index.html"
+    return (
+        html.escape(path.read_text(encoding="utf-8"))
+        if path.exists()
+        else "<h1>Rhum & ruin – HyperRush</h1>"
+    )
 
 
 @app.get("/name")
 def name() -> str:
-    return "Monty_Ruin"
+    return "Rhum & ruin – HyperRush"
 
 
 @app.get("/start_game")
 def start_game(game_id: GameIdDependency) -> DopynionResponseStr:
+    SESS[game_id] = {
+        "actions": 1,
+        "buys": 1,
+        "coins_bonus": 0,
+        "coins_spent": 0,
+        "owned": {},
+        "turn": 0,
+    }
     return DopynionResponseStr(game_id=game_id, decision="OK")
 
 
 @app.get("/start_turn")
 def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
     init_turn_state(game_id)
-    # compteur de tour
-    s = SESS.setdefault(game_id, {"owned": {}})
+    s = SESS.setdefault(game_id, {"owned": {}, "turn": 0})
     s["turn"] = s.get("turn", 0) + 1
-    # info utile: HIRELINGs possédées
-    rec_cnt = (s.get("owned") or {}).get(CardName.HIRELING, 0)
-    print(f"[start_turn] game={game_id} turn={s['turn']} recrues_owned={rec_cnt}")
     return DopynionResponseStr(game_id=game_id, decision="OK")
 
 
+#####################################################
+# STRATÉGIE PRINCIPALE : RUSH ~10 TOURS
+#####################################################
 
-# --- Constants de stratégie (tweakables) ---
-PROV_THRESHOLD = 4            # si <= ce nombre dans la pile de PV principale, switch agressif
-SCORE_DELTA = 4               # si un adversaire te distance >= ce delta, switch agressif
-ENGINE_PROVINCE_MONEY = 12    # argent cible dans un tour pour considérer qu'on peut faire Province(s)
-DOUBLE_PROVINCE_BUYS = 2      # si on a >= buys pour tenter double achat
 
 @app.post("/play")
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
@@ -184,120 +255,42 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     hand = me.hand.quantities        # dict[CardName,int]
     stock = game.stock.quantities    # dict[CardName,int]
     ts = get_turn_state(game_id)
+    s = SESS.setdefault(
+        game_id,
+        {
+            "actions": 1,
+            "buys": 1,
+            "coins_bonus": 0,
+            "coins_spent": 0,
+            "owned": {},
+            "turn": 1,
+        },
+    )
 
-    # helpers
-    def hq(c: CardName) -> int: return hand.get(c, 0)
-    def in_stock(c: CardName) -> bool: return stock.get(c, 0) > 0
+    def hq(c: CardName) -> int:
+        return hand.get(c, 0)
+
     def money_treasures() -> int:
-        return hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3
+        total = (
+            hq(CardName.COPPER) * 1
+            + hq(CardName.SILVER) * 2
+            + hq(CardName.GOLD) * 3
+        )
+        # Cursed Gold = 3$
+        if hasattr(CardName, "CURSED_GOLD"):
+            total += hq(CardName.CURSED_GOLD) * 3
+        return total
+
     def money_available() -> int:
         return money_treasures() + ts["coins_bonus"] - ts["coins_spent"]
 
-    # basic info
-    prov_left = stock.get(CardName.PROVINCE, 0)
-    colony_left = stock.get(CardName.COLONY, 0) if CardName.COLONY in stock else 0
-    main_vp_left = colony_left if colony_left > 0 else prov_left
-
-    my_score = getattr(me, "score", 0) or 0
-    max_opponent_score = max(
-        (getattr(p, "score", 0) or 0) for p in game.players if p is not me
-    ) if game.players else 0
-
-    # quick deck_estimate from visible hand (cheap heuristic)
-    actions_in_hand = sum(
-        1
-        for c in hand
-        if c not in (
-            CardName.COPPER, CardName.SILVER, CardName.GOLD,
-            CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE, CardName.CURSE
-        )
-        and hand[c] > 0
-    )
-    treasure_value = money_treasures()
-
-    print(
-        f"[play] game={game_id} start | actions={ts['actions']} buys={ts['buys']} "
-        f"bonus={ts['coins_bonus']} spent={ts['coins_spent']} "
-        f"treasure={treasure_value} actions_in_hand={actions_in_hand} "
-        f"prov_left={prov_left} colony_left={colony_left} main_vp_left={main_vp_left} "
-        f"my_score={my_score} max_opp={max_opponent_score}"
-    )
-
-    # --------------------
-    # PHASE ACTION (only if actions > 0)
-    # --------------------
-    if ts["actions"] > 0:
-        # priorité moteur inchangée, nouvelles cartes ajoutées en fin de liste
-        action_priority = [
-            CardName.MARKET,     # +1 carte, +1 action, +1 buy, +1$
-            CardName.LABORATORY, # +2 cartes, +1 action
-            CardName.VILLAGE,    # +2 actions, +1 carte
-            CardName.FESTIVAL,   # +2 actions, +1 buy, +2$
-            CardName.HIRELING,   # terminal; on veut l'armer tôt une fois qu'on a des +actions
-            CardName.WITCH,      # terminal
-            CardName.SMITHY,     # terminal
-            CardName.WOODCUTTER, # terminal
-
-            # Nouvelles cartes, jouées seulement si présentes (ne perturbent pas l'ancien ordre)
-            CardName.ARTIFICER,
-            CardName.MARQUIS,
-            CardName.POACHER,
-        ]
-
-        for a in action_priority:
-            if hq(a) > 0 and a.name in EFFECTS:
-                acts, buys, coins, _ = EFFECTS[a.name]
-                ts["actions"] -= 1
-                ts["actions"] += acts
-                ts["buys"] += buys
-                ts["coins_bonus"] += coins
-                print(
-                    f"[play] ACTION {a.name} applied -> +acts={acts} +buys={buys} +$={coins} "
-                    f"=> actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}"
-                )
-                return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
-
-    # --------------------
-    # Decide mode: engine-first or aggressive Duchy-steal
-    # --------------------
-    aggressive_mode = False
-    if main_vp_left and main_vp_left <= PROV_THRESHOLD:
-        aggressive_mode = True
-    if (max_opponent_score - my_score) >= SCORE_DELTA:
-        aggressive_mode = True
-
-    engine_ready = (
-        money_available() >= ENGINE_PROVINCE_MONEY
-        or (treasure_value + ts["coins_bonus"] >= 8 and ts["buys"] >= 1)
-    )
-
-    print(
-        f"[play] mode decision -> aggressive={aggressive_mode} "
-        f"engine_ready={engine_ready} money_avail={money_available()}"
-    )
-
-    # (bloc dupliqué dans le code original, on garde le comportement)
-    aggressive_mode = False
-    if main_vp_left and main_vp_left <= PROV_THRESHOLD:
-        aggressive_mode = True
-    if (max_opponent_score - my_score) >= SCORE_DELTA:
-        aggressive_mode = True
-
-    engine_ready = (
-        money_available() >= ENGINE_PROVINCE_MONEY
-        or (treasure_value + ts["coins_bonus"] >= 8 and ts["buys"] >= 1)
-    )
-
-    print(
-        f"[play] mode decision -> aggressive={aggressive_mode} "
-        f"engine_ready={engine_ready} money_avail={money_available()}"
-    )
-
-    # --------------------
-    # PHASE ACHAT
-    # --------------------
     def can_buy(c: CardName) -> bool:
-        return ts["buys"] > 0 and stock.get(c, 0) and money_available() >= COST[c]
+        return (
+            ts["buys"] > 0
+            and c in COST
+            and stock.get(c, 0) > 0
+            and money_available() >= COST[c]
+        )
 
     def do_buy(c: CardName) -> DopynionResponseStr:
         cost = COST[c]
@@ -305,155 +298,180 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         ts["coins_spent"] += cost
         inc_owned(game_id, c)
         print(
-            f"[buy] BUY {c.name} cost={cost} -> buys_left={ts['buys']} "
-            f"spent={ts['coins_spent']} avail_now={money_available()}"
+            f"[buy] game={game_id} BUY {c.name} cost={cost} "
+            f"buys_left={ts['buys']} spent={ts['coins_spent']} money_after={money_available()}"
         )
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
 
+    # --- infos de partie ---
+    turn_no = s.get("turn", 1)
+    my_score = getattr(me, "score", 0) or 0
+    max_opp_score = max(
+        (getattr(p, "score", 0) or 0) for p in game.players if p is not me
+    ) if game.players else 0
+
+    prov_left = stock.get(CardName.PROVINCE, 0)
+    colony_card = getattr(CardName, "COLONY", None) if hasattr(CardName, "COLONY") else None
+    colony_left = stock.get(colony_card, 0) if colony_card in stock else 0
+    curses_left = stock.get(CardName.CURSE, 0) if CardName.CURSE in stock else 0
+
+    owned_local = s.get("owned", {})
+    wt_cnt = owned_local.get(CardName.WITCH, 0)
+    sm_cnt = owned_local.get(CardName.SMITHY, 0)
+    remake_card = getattr(CardName, "REMAKE", None)
+    remake_cnt = owned_local.get(remake_card, 0) if remake_card else 0
+    gardens_card = getattr(CardName, "GARDENS", None) if hasattr(CardName, "GARDENS") else None
+    gardens_cnt = owned_local.get(gardens_card, 0) if gardens_card else 0
+    magpie_card = getattr(CardName, "MAG_PIE", None) if hasattr(CardName, "MAG_PIE") else None
+    magpie_cnt = owned_local.get(magpie_card, 0) if magpie_card else 0
+    port_card = getattr(CardName, "PORT", None) if hasattr(CardName, "PORT") else None
+    port_cnt = owned_local.get(port_card, 0) if port_card else 0
+
+    # estimation très grossière du nb de cartes pour Gardens
+    total_gained = sum(owned_local.values())
+    estimated_total_cards = 10 + total_gained  # ignore trash / gains auto, suffisant pour heuristique
+
+    print(
+        f"[play] game={game_id} t={turn_no} "
+        f"$={money_available()} prov_left={prov_left} colony_left={colony_left} curses_left={curses_left} "
+        f"score={my_score}/{max_opp_score} "
+        f"owned: WITCH={wt_cnt} REMAKE={remake_cnt} GARDENS={gardens_cnt} "
+        f"MAGPIE={magpie_cnt} PORT={port_cnt} cards~={estimated_total_cards}"
+    )
+
+    # --------------------
+    # PHASE ACTION : priorité aux attaques / draw utiles
+    # --------------------
+    if ts["actions"] > 0:
+        action_priority: list[CardName] = []
+
+        # Core attaques / draw
+        action_priority.append(CardName.WITCH)
+        if hasattr(CardName, "MILITIA"):
+            action_priority.append(CardName.MILITIA)
+        if hasattr(CardName, "COUNCIL_ROOM"):
+            action_priority.append(CardName.COUNCIL_ROOM)
+
+        # Draw brut / cantrips
+        action_priority.append(CardName.SMITHY)
+        if hasattr(CardName, "HARVEST"):
+            action_priority.append(CardName.HARVEST)
+        if hasattr(CardName, "MAG_PIE"):
+            action_priority.append(CardName.MAG_PIE)
+        if hasattr(CardName, "PORT"):
+            action_priority.append(CardName.PORT)
+
+        # Moteur léger (sans overbuild)
+        action_priority.append(CardName.MARKET)
+        action_priority.append(CardName.FESTIVAL)
+        action_priority.append(CardName.LABORATORY)
+        if hasattr(CardName, "FARMING_VILLAGE"):
+            action_priority.append(CardName.FARMING_VILLAGE)
+        action_priority.append(CardName.VILLAGE)
+        action_priority.append(CardName.WOODCUTTER)
+
+        # Support
+        if hasattr(CardName, "ARTIFICER"):
+            action_priority.append(CardName.ARTIFICER)
+        if hasattr(CardName, "MARQUIS"):
+            action_priority.append(CardName.MARQUIS)
+        if hasattr(CardName, "POACHER"):
+            action_priority.append(CardName.POACHER)
+        action_priority.append(CardName.HIRELING)
+        if hasattr(CardName, "BANDIT"):
+            action_priority.append(CardName.BANDIT)
+        if hasattr(CardName, "BUREAUCRAT"):
+            action_priority.append(CardName.BUREAUCRAT)
+        if hasattr(CardName, "CHANCELLOR"):
+            action_priority.append(CardName.CHANCELLOR)
+        if hasattr(CardName, "DISTANT_SHORE"):
+            action_priority.append(CardName.DISTANT_SHORE)
+        if remake_card:
+            action_priority.append(remake_card)
+
+        for a in action_priority:
+            if a in hand and a.name in EFFECTS and ts["actions"] > 0:
+                acts, buys, coins, _draw = EFFECTS[a.name]
+                ts["actions"] -= 1
+                ts["actions"] += acts
+                ts["buys"] += buys
+                ts["coins_bonus"] += coins
+                print(
+                    f"[play] ACTION {a.name} -> +acts={acts} +buys={buys} +$={coins} "
+                    f"=> actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']}"
+                )
+                return DopynionResponseStr(game_id=game_id, decision=f"ACTION {a.name}")
+
+    # --------------------
+    # PHASE ACHAT : HYPER RUSH
+    # Objectif : 3 piles vides rapidement (Curse + Gardens + Port/MagPie/Duchy),
+    # en restant devant en PV.
+    # --------------------
     if ts["buys"] > 0:
-        turn_no = SESS[game_id].get("turn", 1)
-        enemy_alive = any(
-            "equipe3" in (getattr(p, "name", "") or "").lower()
-            for p in game.players
-        )
+        behind = (max_opp_score - my_score) >= 2
+        colony_in_game = colony_card is not None and colony_left > 0
 
-        vg_cnt  = owned(game_id, CardName.VILLAGE)
-        mk_cnt  = owned(game_id, CardName.MARKET)
-        sm_cnt  = owned(game_id, CardName.SMITHY)
-        wt_cnt  = owned(game_id, CardName.WITCH)
-        lab_cnt = owned(game_id, CardName.LABORATORY)
-        gd_cnt  = owned(game_id, CardName.GOLD)
-        rc_cnt  = owned(game_id, CardName.HIRELING)
-
-        prov_left     = stock.get(CardName.PROVINCE, 0)
-        colony_left   = stock.get(CardName.COLONY, 0) if CardName.COLONY in stock else 0
-        main_vp_left  = colony_left if colony_left > 0 else prov_left
-
-        curses_left   = stock.get(CardName.CURSE, 0) if CardName.CURSE in stock else 0
-        villages_left = stock.get(CardName.VILLAGE, 0) if CardName.VILLAGE in stock else 0
-        AGGRO_DUCHY   = (
-            (main_vp_left and main_vp_left <= 4)
-            or ((max_opponent_score - my_score) >= 4)
-        )
-
-        print(
-            f"[buy] t={turn_no} $={money_available()} prov={prov_left} colony={colony_left} "
-            f"main_vp={main_vp_left} curses={curses_left} "
-            f"owned: RC={rc_cnt} VG={vg_cnt} MK={mk_cnt} LAB={lab_cnt} "
-            f"WT={wt_cnt} SM={sm_cnt} GOLD={gd_cnt} "
-            f"villages_left={villages_left} aggro_duchy={AGGRO_DUCHY} "
-            f"enemy_alive={enemy_alive}"
-        )
-
-        # ===== 0) PRIORITÉ ABSOLUE: COLONY si possible
-        if CardName.COLONY in COST and CardName.COLONY in stock and can_buy(CardName.COLONY):
-            return do_buy(CardName.COLONY)
-
-        # ===== 0bis) Province si possible (toujours)
-        if can_buy(CardName.PROVINCE):
+        # 1) Colonies / Provinces -> accélère la fin si on a l'éco
+        if colony_in_game and can_buy(colony_card):
+            return do_buy(colony_card)
+        if can_buy(CardName.PROVINCE) and (turn_no >= 6 or prov_left <= 6):
             return do_buy(CardName.PROVINCE)
 
-        # ===== 1) EARLY GAME — anti-Équipe3 + installation HIRELING
-        if turn_no <= 8:
-            # 1a) Si aucune Witch et des Curses restent: Witch d'abord
-            if curses_left > 0 and wt_cnt < 1 and can_buy(CardName.WITCH):
-                return do_buy(CardName.WITCH)
-
-            # 1b) À 6$ : HIRELING > GOLD (cap 2 en early)
-            if can_buy(CardName.HIRELING) and rc_cnt < 2:
-                return do_buy(CardName.HIRELING)
-
-            # 1c) À 5$ : Market (cap 2)
-            if can_buy(CardName.MARKET) and mk_cnt < 2:
-                return do_buy(CardName.MARKET)
-
-            # 1d) Gold (cap 1 en early)
-            if can_buy(CardName.GOLD) and gd_cnt < 1:
-                return do_buy(CardName.GOLD)
-
-            # 1e) Silver par défaut
-            if can_buy(CardName.SILVER):
-                return do_buy(CardName.SILVER)
-
-        # ===== 2) MID GAME — spam curse + stack HIRELING, puis deny Village
-        if curses_left > 0:
-            # 2a) 2e Witch (cap 2) — cap 3 si l’adversaire manque de Villages
-            cap_witch = 3 if (enemy_alive and villages_left <= 7) else 2
-            if can_buy(CardName.WITCH) and wt_cnt < cap_witch:
-                return do_buy(CardName.WITCH)
-
-            # 2b) Stabilité: Market puis Laboratory (cap 2 chacun)
-            if can_buy(CardName.MARKET) and mk_cnt < 2:
-                return do_buy(CardName.MARKET)
-            if can_buy(CardName.LABORATORY) and lab_cnt < 2:
-                return do_buy(CardName.LABORATORY)
-
-            # 2c) HIRELING à 6$ (cap 3 global)
-            if can_buy(CardName.HIRELING) and rc_cnt < 3:
-                return do_buy(CardName.HIRELING)
-
-            # 2d) Deny Village (cap 2 chez nous)
-            if enemy_alive and villages_left > 0 and vg_cnt < 2 and can_buy(CardName.VILLAGE):
-                return do_buy(CardName.VILLAGE)
-
-        # ===== 3) FIN DES CURSES — convertir l’avantage en points / tempo
-        if curses_left == 0 and enemy_alive and villages_left <= 2:
-            if CardName.COLONY in COST and CardName.COLONY in stock and can_buy(CardName.COLONY):
-                return do_buy(CardName.COLONY)
-            if can_buy(CardName.PROVINCE):
-                return do_buy(CardName.PROVINCE)
-            if AGGRO_DUCHY and can_buy(CardName.DUCHY):
-                return do_buy(CardName.DUCHY)
-
-        # ===== 4) PLAN STANDARD (fallback)
-        # Colony / Province
-        if CardName.COLONY in COST and CardName.COLONY in stock and can_buy(CardName.COLONY):
-            return do_buy(CardName.COLONY)
-        if can_buy(CardName.PROVINCE):
-            return do_buy(CardName.PROVINCE)
-
-        # Duchy si rattrapage / fin
-        if AGGRO_DUCHY and can_buy(CardName.DUCHY):
-            return do_buy(CardName.DUCHY)
-
-        # À 6$ : HIRELING (cap 3) > GOLD (cap 2)
-        if can_buy(CardName.HIRELING) and rc_cnt < 3:
-            return do_buy(CardName.HIRELING)
-        if can_buy(CardName.GOLD) and gd_cnt < 2:
-            return do_buy(CardName.GOLD)
-
-        # À 5$ : Market (cap 2) > Laboratory (cap 2) > Witch (si Curses restent et < 2)
-        if can_buy(CardName.MARKET) and mk_cnt < 2:
-            return do_buy(CardName.MARKET)
-        if can_buy(CardName.LABORATORY) and lab_cnt < 2:
-            return do_buy(CardName.LABORATORY)
-        if curses_left > 0 and can_buy(CardName.WITCH) and wt_cnt < 2:
+        # 2) Witch tôt pour vider la pile de Curses + ralentir l'adversaire
+        if curses_left > 0 and wt_cnt < 2 and can_buy(CardName.WITCH) and turn_no <= 7:
             return do_buy(CardName.WITCH)
 
-        # À 4$ : Smithy (cap 2) seulement si on a déjà +Actions
-        if can_buy(CardName.SMITHY) and (vg_cnt + mk_cnt) >= 1 and sm_cnt < 2:
+        # 3) Remake tôt pour gérer Curses / Estates
+        if remake_card and turn_no <= 5 and remake_cnt < 1 and can_buy(remake_card):
+            return do_buy(remake_card)
+
+        # 4) Gardens : alt-VP + pile facile à vider
+        if gardens_card and can_buy(gardens_card) and (
+            turn_no >= 4 or estimated_total_cards >= 15
+        ):
+            return do_buy(gardens_card)
+
+        # 5) Duchy agressif (pile VP intermédiaire)
+        if can_buy(CardName.DUCHY) and (
+            prov_left <= 4
+            or (colony_in_game and colony_left <= 4)
+            or turn_no >= 8
+            or behind
+        ):
+            return do_buy(CardName.DUCHY)
+
+        # 6) Ports : double gain, vide une pile très vite + cantrip
+        if port_card and can_buy(port_card):
+            return do_buy(port_card)
+
+        # 7) Mag Pie : swarm rapide, vide la pile et stabilise la pioche
+        if magpie_card and can_buy(magpie_card):
+            return do_buy(magpie_card)
+
+        # 8) Mid game : un Smithy max pour lisser les mains
+        if 5 <= turn_no <= 9 and can_buy(CardName.SMITHY) and sm_cnt < 1:
             return do_buy(CardName.SMITHY)
 
-        # À 3$ : Silver
+        # 9) Éco brute pour claquer rapidement Provinces / Colonies
+        if can_buy(CardName.GOLD):
+            return do_buy(CardName.GOLD)
         if can_buy(CardName.SILVER):
             return do_buy(CardName.SILVER)
 
-        # Duchy opportuniste
-        if can_buy(CardName.DUCHY):
-            return do_buy(CardName.DUCHY)
-
-        # Estate tardif (éviter en early)
-        if turn_no > 10 and can_buy(CardName.ESTATE):
+        # 10) Estates en toute fin pour sécuriser / vider la pile
+        if turn_no >= 9 and can_buy(CardName.ESTATE):
             return do_buy(CardName.ESTATE)
 
-
     print(
-        f"[play] nothing to do -> END_TURN | state actions={ts['actions']} "
-        f"buys={ts['buys']} bonus={ts['coins_bonus']} spent={ts['coins_spent']}"
+        f"[play] game={game_id} nothing to do -> END_TURN | "
+        f"actions={ts['actions']} buys={ts['buys']} bonus={ts['coins_bonus']} spent={ts['coins_spent']}"
     )
     return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
 
+#####################################################
+# Fin de partie
+#####################################################
 
 
 @app.get("/end_game")
@@ -462,26 +480,40 @@ def end_game(game_id: GameIdDependency) -> DopynionResponseStr:
     return DopynionResponseStr(game_id=game_id, decision="OK")
 
 
+#####################################################
+# Callbacks génériques : défausse, trash, etc.
+#####################################################
+
 
 @app.post("/confirm_discard_card_from_hand")
 async def confirm_discard_card_from_hand(
     game_id: GameIdDependency,
     _decision_input: CardNameAndHand,
 ) -> DopynionResponseBool:
+    # On accepte de défausser quand l'arbitre le propose
     return DopynionResponseBool(game_id=game_id, decision=True)
 
 
 @app.post("/discard_card_from_hand")
-async def discard_card_from_hand(game_id: GameIdDependency, decision_input: Hand) -> DopynionResponseCardName:
-    # ordre safe
-    order = [CardName.CURSE, CardName.ESTATE, CardName.COPPER, CardName.SILVER, CardName.GOLD]
-    for c in order:
-        if c in decision_input.hand:
+async def discard_card_from_hand(
+    game_id: GameIdDependency,
+    decision_input: Hand,
+) -> DopynionResponseCardName:
+    # Ordre de défausse : CURSE > ESTATE > COPPER > SILVER > GOLD > reste
+    priority = [
+        CardName.CURSE,
+        CardName.ESTATE,
+        CardName.COPPER,
+        CardName.SILVER,
+        CardName.GOLD,
+    ]
+    in_hand = list(decision_input.hand)
+    for c in priority:
+        if c in in_hand:
             print(f"[discard] choose {c.name}")
             return DopynionResponseCardName(game_id=game_id, decision=c)
-    print(f"[discard] default {decision_input.hand[0].name}")
-    return DopynionResponseCardName(game_id=game_id, decision=decision_input.hand[0])
-
+    print(f"[discard] default {in_hand[0].name}")
+    return DopynionResponseCardName(game_id=game_id, decision=in_hand[0])
 
 
 @app.post("/confirm_trash_card_from_hand")
@@ -489,23 +521,37 @@ async def confirm_trash_card_from_hand(
     game_id: GameIdDependency,
     _decision_input: CardNameAndHand,
 ) -> DopynionResponseBool:
+    # On accepte de trash quand l'arbitre le propose
     return DopynionResponseBool(game_id=game_id, decision=True)
 
 
 @app.post("/trash_card_from_hand")
-async def trash_card_from_hand(game_id: GameIdDependency, decision_input: Hand) -> DopynionResponseCardName:
-    for c in [CardName.CURSE, CardName.COPPER, CardName.ESTATE]:
-        if c in decision_input.hand:
+async def trash_card_from_hand(
+    game_id: GameIdDependency,
+    decision_input: Hand,
+) -> DopynionResponseCardName:
+    # Ordre de trash : CURSE > ESTATE > COPPER > SILVER > GOLD > reste
+    priority = [
+        CardName.CURSE,
+        CardName.ESTATE,
+        CardName.COPPER,
+        CardName.SILVER,
+        CardName.GOLD,
+    ]
+    in_hand = list(decision_input.hand)
+    for c in priority:
+        if c in in_hand:
             print(f"[trash] choose {c.name}")
             return DopynionResponseCardName(game_id=game_id, decision=c)
-    print(f"[trash] default {decision_input.hand[0].name}")
-    return DopynionResponseCardName(game_id=game_id, decision=decision_input.hand[0])
+    print(f"[trash] default {in_hand[0].name}")
+    return DopynionResponseCardName(game_id=game_id, decision=in_hand[0])
 
 
 @app.post("/confirm_discard_deck")
 async def confirm_discard_deck(
     game_id: GameIdDependency,
 ) -> DopynionResponseBool:
+    # OK pour défausser le deck quand demandé
     return DopynionResponseBool(game_id=game_id, decision=True)
 
 
@@ -514,6 +560,7 @@ async def choose_card_to_receive_in_discard(
     game_id: GameIdDependency,
     decision_input: PossibleCards,
 ) -> DopynionResponseCardName:
+    # Choix neutre : premier choix proposé
     return DopynionResponseCardName(
         game_id=game_id,
         decision=decision_input.possible_cards[0],
@@ -525,6 +572,7 @@ async def choose_card_to_receive_in_deck(
     game_id: GameIdDependency,
     decision_input: PossibleCards,
 ) -> DopynionResponseCardName:
+    # Choix neutre : premier choix proposé
     return DopynionResponseCardName(
         game_id=game_id,
         decision=decision_input.possible_cards[0],
@@ -536,6 +584,7 @@ async def skip_card_reception_in_hand(
     game_id: GameIdDependency,
     _decision_input: CardNameAndHand,
 ) -> DopynionResponseBool:
+    # On accepte de ne pas recevoir la carte en main si proposé
     return DopynionResponseBool(game_id=game_id, decision=True)
 
 
@@ -544,17 +593,12 @@ async def trash_money_card_for_better_money_card(
     game_id: GameIdDependency,
     decision_input: MoneyCardsInHand,
 ) -> DopynionResponseCardName:
-    # Décision 1 Remake-like : trash la plus faible valeur possible
-    # pour maximiser Copper -> Silver -> Gold et éviter de flinguer l'économie.
-    for c in [CardName.COPPER, CardName.SILVER, CardName.GOLD]:
-        if c in decision_input.money_in_hand:
+    # Remake-like: on trash la plus faible valeur possible
+    priority = [CardName.COPPER, CardName.SILVER, CardName.GOLD]
+    in_hand = list(decision_input.money_in_hand)
+    for c in priority:
+        if c in in_hand:
             print(f"[trash_money] choose {c.name}")
-            return DopynionResponseCardName(
-                game_id=game_id,
-                decision=c,
-            )
-    print(f"[trash_money] default {decision_input.money_in_hand[0].name}")
-    return DopynionResponseCardName(
-        game_id=game_id,
-        decision=decision_input.money_in_hand[0],
-    )
+            return DopynionResponseCardName(game_id=game_id, decision=c)
+    print(f"[trash_money] default {in_hand[0].name}")
+    return DopynionResponseCardName(game_id=game_id, decision=in_hand[0])
