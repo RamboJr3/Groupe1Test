@@ -209,7 +209,7 @@ def root() -> str:
     return (
         html.escape(path.read_text(encoding="utf-8"))
         if path.exists()
-        else "<h1>Rhum & ruin – HyperRush</h1>"
+        else "<h1>T'es Ruiné</h1>"
     )
 
 
