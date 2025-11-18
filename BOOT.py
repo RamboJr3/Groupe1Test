@@ -287,12 +287,13 @@ def decide_action(hand: dict, stock: dict, num_players: int, ts: dict) -> str | 
     """
     Décide quelle action jouer selon le nombre de joueurs
     
-    2-3J : VincentBM (Smithy > Bandit/Thief > Militia)
+    2-3J : VincentBM (Chapel > Smithy > Thief > Bandit)
     4J : Witch uniquement (RhumRuin)
     """
     if num_players <= 3:
-        # VincentBM : priorité Smithy > Bandit > Thief > Militia
-        action_priority = ["SMITHY", "BANDIT", "THIEF", "MILITIA"]
+        # VincentBM : priorité Chapel > Smithy > Thief > Bandit
+        # Chapel/Thief peuvent ne pas exister, le code s'adapte automatiquement
+        action_priority = ["CHAPEL", "SMITHY", "THIEF", "BANDIT"]
         for action in action_priority:
             card_name = getattr(CardName, action, None)
             if card_name and hand.get(card_name, 0) > 0:
@@ -309,8 +310,10 @@ def decide_buy(stock: dict, money_available, can_buy, owned, game_id: str, num_p
     """
     Décide quoi acheter selon le nombre de joueurs
     
-    2-3J : VincentBM optimisé (Smithy + Bandit + Big Money avec Duchy timing)
+    2-3J : VincentBM optimisé (Chapel + Thief + Smithy + Big Money avec Duchy timing intelligent)
     4J : RhumRuin (Duchy rush)
+    
+    Stratégie identique à StratRuinLaPromo d'Arbitre_local2.py (77.3% WR à 2J)
     """
     money = money_available()
     turn = ts.get("turn", 0)
@@ -318,15 +321,30 @@ def decide_buy(stock: dict, money_available, can_buy, owned, game_id: str, num_p
     duchy_left = stock.get(CardName.DUCHY, 0)
     
     # Compteurs
+    chapel_cnt = owned(game_id, getattr(CardName, "CHAPEL", CardName.COPPER))
     smithy_cnt = owned(game_id, CardName.SMITHY)
-    bandit_cnt = owned(game_id, getattr(CardName, "BANDIT", CardName.COPPER))
     thief_cnt = owned(game_id, getattr(CardName, "THIEF", CardName.COPPER))
+    bandit_cnt = owned(game_id, getattr(CardName, "BANDIT", CardName.COPPER))
     witch_cnt = owned(game_id, CardName.WITCH)
     
     # === 2 ou 3 JOUEURS : VINCENTBM ===
     if num_players <= 3:
-        # 0) Fin de partie : rattrapage avec Duchy
-        if prov_left <= 4 or duchy_left <= 3:
+        # 0) Fin de partie : détection intelligente "behind" + rattrapage avec Duchy
+        # Calcul approximatif du score (on ne peut pas voir les decks adverses en API)
+        my_prov = owned(game_id, CardName.PROVINCE)
+        my_duchy = owned(game_id, CardName.DUCHY)
+        my_estate = owned(game_id, CardName.ESTATE)
+        my_score = my_prov * 6 + my_duchy * 3 + my_estate * 1
+        
+        # Estimation du score moyen adversaire
+        total_prov_in_game = 8 if num_players == 2 else 12
+        total_prov_bought = total_prov_in_game - prov_left
+        avg_opp_prov = max(0, total_prov_bought - my_prov) / max(1, num_players - 1)
+        estimated_opp_score = avg_opp_prov * 6  # Approximation conservative
+        
+        behind = my_score + 6 <= estimated_opp_score
+        
+        if prov_left <= 4 or behind:
             if can_buy(CardName.PROVINCE):
                 return CardName.PROVINCE
             if duchy_left > 0 and can_buy(CardName.DUCHY):
@@ -340,35 +358,33 @@ def decide_buy(stock: dict, money_available, can_buy, owned, game_id: str, num_p
         if money >= 6 and can_buy(CardName.GOLD):
             return CardName.GOLD
         
-        # 3. Early game (tours 1-4) : Smithy > Bandit/Thief
+        # 3. Early game (tours 1-4) : Chapel > Thief > Smithy
+        # Chapel/Thief peuvent ne pas exister, le code s'adapte automatiquement
         if turn <= 4:
-            if smithy_cnt < 2 and can_buy(CardName.SMITHY):
-                return CardName.SMITHY
-            bandit_card = getattr(CardName, "BANDIT", None)
-            if bandit_card and bandit_cnt < 2 and can_buy(bandit_card):
-                return bandit_card
+            chapel_card = getattr(CardName, "CHAPEL", None)
+            if chapel_card and chapel_cnt < 1 and can_buy(chapel_card):
+                return chapel_card
+            
             thief_card = getattr(CardName, "THIEF", None)
-            if thief_card and thief_cnt < 1 and can_buy(thief_card):
+            if thief_card and thief_cnt < 2 and can_buy(thief_card):
                 return thief_card
+            
+            if smithy_cnt < 1 and can_buy(CardName.SMITHY):
+                return CardName.SMITHY
         
         # 4. Mid-game : compléter les terminaux
         if money >= 5:
-            if smithy_cnt < 2 and can_buy(CardName.SMITHY):
+            thief_card = getattr(CardName, "THIEF", None)
+            if thief_card and thief_cnt < 2 and can_buy(thief_card):
+                return thief_card
+            elif smithy_cnt < 2 and can_buy(CardName.SMITHY):
                 return CardName.SMITHY
-            bandit_card = getattr(CardName, "BANDIT", None)
-            if bandit_card and (bandit_cnt + thief_cnt) < 2 and can_buy(bandit_card):
-                return bandit_card
         
-        # 5. Duchy timing optimisé : 5 coins quand provinces basses
-        if money == 5 and (prov_left <= 5 or duchy_left <= 6):
-            if can_buy(CardName.DUCHY):
-                return CardName.DUCHY
-        
-        # 6. Silver par défaut
+        # 5. Silver par défaut
         if can_buy(CardName.SILVER):
             return CardName.SILVER
         
-        # 7. Estate très tardif
+        # 6. Estate très tardif
         if prov_left <= 2 and can_buy(CardName.ESTATE):
             return CardName.ESTATE
     
