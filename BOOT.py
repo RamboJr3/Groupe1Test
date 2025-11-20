@@ -268,88 +268,77 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
 
     if num_players == 2:
 
-        # === PHASE ACTION ===
-        if ts["actions"] > 0:
-            # Une seule action utile en 2J : Witch
-            if hand.get(CardName.WITCH, 0):
-                print(f"[play_action] game={game_id} ACTION WITCH")
+        def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
+            # --- trouver "moi" ---
+            me = next((p for p in game.players if p.hand is not None), None)
+            if not me or not me.hand:
+                return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
-                if "WITCH" in EFFECTS:
-                    addA, addB, addC, _ = EFFECTS["WITCH"]
-                    ts["actions"] -= 1
-                    ts["actions"] += addA
-                    ts["buys"] += addB
-                    ts["coins_bonus"] += addC
+            hand = me.hand.quantities
+            stock = game.stock.quantities
+            ts = get_turn_state(game_id)
 
-                return DopynionResponseStr(
-                    game_id=game_id,
-                    decision="ACTION WITCH"
-                )
+            # helpers
+            def hq(c: CardName) -> int: return hand.get(c, 0)
+            def in_stock(c: CardName) -> bool: return stock.get(c, 0) > 0
+            def money_treasures() -> int:
+                return hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3
+            def money_available() -> int:
+                return money_treasures() + ts["coins_bonus"] - ts["coins_spent"]
 
-        # === PHASE ACHAT ===
-        def money_2j():
-            copper = hand.get(CardName.COPPER, 0)
-            silver = hand.get(CardName.SILVER, 0)
-            gold = hand.get(CardName.GOLD, 0)
-            platinum = hand.get(CardName.PLATINUM, 0)
-            cursedgold = hand.get(getattr(CardName, "CURSEDGOLD", None), 0)
-            bonus = ts.get("coins_bonus", 0)
-            spent = ts.get("coins_spent", 0)
+            # --- Phase Achat : décisions renforcées ---
+            def can_buy(c: CardName) -> bool:
+                return ts["buys"] > 0 and stock.get(c, 0) and money_available() >= COST[c]
 
-            return copper*1 + silver*2 + gold*3 + platinum*5 + cursedgold*3 + bonus - spent
+            def do_buy(c: CardName) -> DopynionResponseStr:
+                cost = COST[c]
+                ts["buys"] -= 1
+                ts["coins_spent"] += cost
+                inc_owned(game_id, c)
+                return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
 
-        def can_buy(c):
-            return (
-                ts["buys"] > 0
-                and stock.get(c, 0) > 0
-                and money_2j() >= COST[c]
-            )
+            # --- Décision d'achat améliorée ---
+            if ts["buys"] > 0:
+                prov_left = stock.get(CardName.PROVINCE, 0)
+                curses_left = stock.get(CardName.CURSE, 0) if CardName.CURSE in stock else 0
 
-        def do_buy(c):
-            cost = COST[c]
-            ts["buys"] -= 1
-            ts["coins_spent"] += cost
-            inc_owned(game_id, c)
+                # Agressive mode : si Provinces proches d'être épuisées ou si écart de score trop important
+                aggressive_mode = prov_left <= 4 or (max_opponent_score - my_score) >= 4
 
-            print(f"[buy] game={game_id} BUY {c.name} cost={cost}")
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
+                # Achetez Province dès que possible si moteur prêt
+                if can_buy(CardName.PROVINCE) and not aggressive_mode:
+                    return do_buy(CardName.PROVINCE)
 
+                # --- Mode agressif : Duchy si écart important ---
+                if aggressive_mode:
+                    if can_buy(CardName.DUCHY):
+                        return do_buy(CardName.DUCHY)
 
-        money = money_2j()
-        witch_count = owned(game_id, CardName.WITCH)
-        curses_left = stock.get(CardName.CURSE, 0)
-        colony_left = stock.get(CardName.COLONY, 99)
-        prov_left = stock.get(CardName.PROVINCE, 99)
+                # --- Achat de cartes puissantes ---
+                if can_buy(CardName.FESTIVAL):
+                    return do_buy(CardName.FESTIVAL)
 
-        # (1) Witch early
-        if curses_left > 0 and witch_count < 2 and money >= 5 and can_buy(CardName.WITCH):
-            return do_buy(CardName.WITCH)
+                if can_buy(CardName.VILLAGE):
+                    return do_buy(CardName.VILLAGE)
 
-        # (2) Colony
-        if money >= 11 and can_buy(CardName.COLONY):
-            return do_buy(CardName.COLONY)
+                # --- Contrôle du deck (achat de cartes comme Witch, Smithy) ---
+                if curses_left > 0 and can_buy(CardName.WITCH):
+                    return do_buy(CardName.WITCH)
 
-        # (3) Platinum
-        if money >= 9 and can_buy(CardName.PLATINUM):
-            return do_buy(CardName.PLATINUM)
+                if can_buy(CardName.SMITHY):
+                    return do_buy(CardName.SMITHY)
 
-        # (4) Province
-        if money >= 8 and can_buy(CardName.PROVINCE):
-            return do_buy(CardName.PROVINCE)
+                # --- Achat de trésors pour accélérer ---
+                if can_buy(CardName.GOLD):
+                    return do_buy(CardName.GOLD)
+                if can_buy(CardName.SILVER):
+                    return do_buy(CardName.SILVER)
 
-        # (5) Gold
-        if money >= 6 and can_buy(CardName.GOLD):
-            return do_buy(CardName.GOLD)
+                # --- Priorité à l'achat de HIRELING pour renforcer les actions ---
+                if can_buy(CardName.HIRELING):
+                    return do_buy(CardName.HIRELING)
 
-        # (6) Silver
-        if money >= 3 and can_buy(CardName.SILVER):
-            return do_buy(CardName.SILVER)
-
-        # (7) Duchy endgame
-        if (colony_left <= 3 or prov_left <= 3) and money >= 5 and can_buy(CardName.DUCHY):
-            return do_buy(CardName.DUCHY)
-
-        return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+            return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
 
     # =====================================================================
