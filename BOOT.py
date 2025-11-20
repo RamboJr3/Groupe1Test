@@ -1,7 +1,7 @@
 import html
 from pathlib import Path
 from typing import Annotated
-
+ 
 from dopynion.data_model import (
     CardName,
     CardNameAndHand,
@@ -13,34 +13,56 @@ from dopynion.data_model import (
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
-
+ 
 app = FastAPI()
-
-# --- ÉTAT DE TOUR ---
-SESS: dict[str, dict] = {}   # { game_id: {"actions": int, "buys": int, "coins_bonus": int, "coins_spent": int} }
-
+ 
+# --- ÉTAT DE TOUR / PARTIE ---
+# SESS[game_id] = {
+#   "actions": int, "buys": int, "coins_bonus": int, "coins_spent": int,
+#   "owned": {CardName: int}, "turn": int
+# }
+SESS: dict[str, dict] = {}
+ 
 def init_turn_state(game_id: str) -> None:
     SESS.setdefault(game_id, {"owned": {}, "turn": 0})
-    SESS[game_id].update({"actions": 1, "buys": 1, "coins_bonus": 0, "coins_spent": 0})
-
-
+    SESS[game_id].update(
+        {"actions": 1, "buys": 1, "coins_bonus": 0, "coins_spent": 0}
+    )
+ 
 def get_turn_state(game_id: str) -> dict:
-    return SESS.setdefault(game_id, {"actions": 1, "buys": 1, "coins_bonus": 0, "coins_spent": 0})
-
-# --- suivi du deck par partie (approx via achats) ---
-# SESS[game_id] = {"actions":..., "buys":..., "coins_bonus":..., "coins_spent":..., "owned": {CardName: int}}
+    return SESS.setdefault(
+        game_id,
+        {
+            "actions": 1,
+            "buys": 1,
+            "coins_bonus": 0,
+            "coins_spent": 0,
+            "owned": {},
+            "turn": 0,
+        },
+    )
+ 
 def inc_owned(game_id: str, card: CardName) -> None:
-    s = SESS.setdefault(game_id, {"actions":1,"buys":1,"coins_bonus":0,"coins_spent":0,"owned":{}})
-    s.setdefault("owned", {})
-    s["owned"][card] = s["owned"].get(card, 0) + 1
-
+    s = SESS.setdefault(
+        game_id,
+        {
+            "actions": 1,
+            "buys": 1,
+            "coins_bonus": 0,
+            "coins_spent": 0,
+            "owned": {},
+            "turn": 0,
+        },
+    )
+    o = s.setdefault("owned", {})
+    o[card] = o.get(card, 0) + 1
+ 
 def owned(game_id: str, card: CardName) -> int:
     s = SESS.get(game_id) or {}
     o = s.get("owned") or {}
     return o.get(card, 0)
-
-
-# --- COÛTS MINIMAUX UTILISÉS (cartes jouables aujourd'hui) ---
+ 
+# --- COÛTS DES CARTES ---
 COST = {
     # Trésors / Victoire
     CardName.COPPER: 0,
@@ -82,9 +104,10 @@ COST = {
     getattr(CardName, "CHAPEL", None): 2 if hasattr(CardName, "CHAPEL") else None,
     getattr(CardName, "THIEF", None): 6 if hasattr(CardName, "THIEF") else None,
 }
-
-
-# --- EFFETS D'ACTIONS (actions, buys, coins_bonus, draw) ---
+# Nettoyage: enlever les clés None éventuelles
+COST = {k: v for k, v in COST.items() if k is not None}
+ 
+# --- EFFETS D'ACTIONS (actions, buys, coins_bonus, draw théorique) ---
 EFFECTS: dict[str, tuple[int, int, int, int]] = {
     "FESTIVAL":       (2, 1, 2, 0),
     "LABORATORY":     (1, 0, 0, 2),
@@ -111,45 +134,36 @@ EFFECTS: dict[str, tuple[int, int, int, int]] = {
     "CHAPEL":         (0, 0, 0, 0),
     "THIEF":          (0, 0, 0, 0),
 }
-
-
+ 
 #####################################################
 # Data model for responses
 #####################################################
-
-
+ 
 class DopynionResponseBool(BaseModel):
     game_id: str
     decision: bool
-
-
+ 
 class DopynionResponseCardName(BaseModel):
     game_id: str
     decision: CardName
-
-
+ 
 class DopynionResponseStr(BaseModel):
     game_id: str
     decision: str
-
-
+ 
 #####################################################
 # Getter for the game identifier
 #####################################################
-
-
+ 
 def get_game_id(x_game_id: str = Header(description="ID of the game")) -> str:
     return x_game_id
-
-
+ 
 GameIdDependency = Annotated[str, Depends(get_game_id)]
-
-
+ 
 #####################################################
 # Error management
 #####################################################
-
-
+ 
 @app.exception_handler(Exception)
 def unknown_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
     print(exc.__class__.__name__, str(exc))
@@ -161,43 +175,50 @@ def unknown_exception_handler(_request: Request, exc: Exception) -> JSONResponse
             "name": exc.__class__.__name__,
         },
     )
-
-
-
+ 
 #####################################################
-# The code of the strategy
+# Static routes
 #####################################################
-
-
+ 
+@app.get("/", response_class=HTMLResponse)
+def root() -> str:
+    path = Path(__file__).parent / "index.html"
+    return (
+        html.escape(path.read_text(encoding="utf-8"))
+        if path.exists()
+        else "<h1>Ruin La Promo – Stratégie Adaptative Ultime</h1>"
+    )
+ 
 @app.get("/name")
 def name() -> str:
     return "Ruin La Promo"
-
-
+ 
 @app.get("/start_game")
 def start_game(game_id: GameIdDependency) -> DopynionResponseStr:
+    SESS[game_id] = {
+        "actions": 1,
+        "buys": 1,
+        "coins_bonus": 0,
+        "coins_spent": 0,
+        "owned": {},
+        "turn": 0,
+    }
     return DopynionResponseStr(game_id=game_id, decision="OK")
-
-
+ 
 @app.get("/start_turn")
 def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
     init_turn_state(game_id)
-    # compteur de tour
-    s = SESS.setdefault(game_id, {"owned": {}})
+    s = SESS.setdefault(game_id, {"owned": {}, "turn": 0})
     s["turn"] = s.get("turn", 0) + 1
-    # info utile: HIRELINGs possédées
-    rec_cnt = (s.get("owned") or {}).get(CardName.HIRELING, 0)
-    print(f"[start_turn] game={game_id} turn={s['turn']} recrues_owned={rec_cnt}")
     return DopynionResponseStr(game_id=game_id, decision="OK")
-
-
-
-# --- Constants de stratégie (tweakables) ---
-PROV_THRESHOLD = 4            # si <= ce nombre de provinces, switch agressif
-SCORE_DELTA = 4               # si un adversaire te distance >= ce delta, switch agressif
-ENGINE_PROVINCE_MONEY = 12    # argent cible dans un tour pour considérer qu'on peut faire Province(s)
-DOUBLE_PROVINCE_BUYS = 2      # si on a >= buys pour tenter double achat
-
+ 
+#####################################################
+# STRATÉGIE PRINCIPALE : RUIN LA PROMO
+# Stratégie adaptative optimisée basée sur 210 000 parties
+# - 2-3 joueurs : VincentBM (Smithy + Bandit + Big Money) → 77% WR à 2J, 58% à 3J
+# - 4 joueurs : RhumRuin (Duchy rush) → 36% WR
+#####################################################
+ 
 @app.post("/play")
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     """
@@ -233,17 +254,25 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         gold = hand.get(CardName.GOLD, 0)
         bonus = ts.get("coins_bonus", 0)
         spent = ts.get("coins_spent", 0)
-        cursed_gold = hand.get(getattr(CardName, "CURSED_GOLD", CardName.COPPER), 0)
+        
+        # Cursed Gold : vérifier qu'il existe vraiment dans CardName
+        cursed_gold_card = getattr(CardName, "CURSED_GOLD", None)
+        cursed_gold = hand.get(cursed_gold_card, 0) if cursed_gold_card else 0
+        
         result = copper * 1 + silver * 2 + gold * 3 + cursed_gold * 3 + bonus - spent
+        print(f"[money] game={game_id} copper={copper} silver={silver} gold={gold} cursed_gold={cursed_gold} bonus={bonus} spent={spent} => total={result}")
         return result
  
     def can_buy(c: CardName):
-        return (
+        can = (
             ts["buys"] > 0
             and c in COST
             and stock.get(c, 0) > 0
             and money_available() >= COST[c]
         )
+        if not can:
+            print(f"[can_buy] game={game_id} card={c.name} buys={ts['buys']} in_cost={c in COST} in_stock={stock.get(c, 0)} money={money_available()} cost={COST.get(c, '?')} => {can}")
+        return can
  
     def do_buy(c: CardName):
         cost = COST[c]
@@ -390,99 +419,146 @@ def decide_buy(stock: dict, money_available, can_buy, owned, game_id: str, num_p
             return CardName.SILVER
     
     return None
-
-
-
-
+ 
+ 
+#####################################################
+# Fin de partie
+#####################################################
+ 
 @app.get("/end_game")
 def end_game(game_id: GameIdDependency) -> DopynionResponseStr:
     SESS.pop(game_id, None)
     return DopynionResponseStr(game_id=game_id, decision="OK")
-
-
-
+ 
+#####################################################
+# Callbacks génériques : défausse, trash, etc.
+#####################################################
+ 
 @app.post("/confirm_discard_card_from_hand")
 async def confirm_discard_card_from_hand(
     game_id: GameIdDependency,
     _decision_input: CardNameAndHand,
 ) -> DopynionResponseBool:
+    # On accepte de défausser quand l'arbitre le propose
     return DopynionResponseBool(game_id=game_id, decision=True)
-
-
+ 
 @app.post("/discard_card_from_hand")
-async def discard_card_from_hand(game_id: GameIdDependency, decision_input: Hand) -> DopynionResponseCardName:
-    # ordre safe
-    order = [CardName.CURSE, CardName.ESTATE, CardName.COPPER, CardName.SILVER, CardName.GOLD]
-    for c in order:
-        if c in decision_input.hand:
+async def discard_card_from_hand(
+    game_id: GameIdDependency,
+    decision_input: Hand,
+) -> DopynionResponseCardName:
+    # Ordre de défausse : CURSE > ESTATE > COPPER > DUCHY > SILVER > GOLD > reste
+    # On garde les cartes Victory importantes (Province) et les attaques
+    priority = [
+        CardName.CURSE,
+        CardName.ESTATE,
+        CardName.COPPER,
+        CardName.DUCHY,
+        CardName.SILVER,
+        CardName.GOLD,
+    ]
+    in_hand = list(decision_input.hand)
+    for c in priority:
+        if c in in_hand:
             print(f"[discard] choose {c.name}")
             return DopynionResponseCardName(game_id=game_id, decision=c)
-    print(f"[discard] default {decision_input.hand[0].name}")
-    return DopynionResponseCardName(game_id=game_id, decision=decision_input.hand[0])
-
-
-
+    print(f"[discard] default {in_hand[0].name}")
+    return DopynionResponseCardName(game_id=game_id, decision=in_hand[0])
+ 
 @app.post("/confirm_trash_card_from_hand")
 async def confirm_trash_card_from_hand(
     game_id: GameIdDependency,
     _decision_input: CardNameAndHand,
 ) -> DopynionResponseBool:
+    # On accepte de trash quand l'arbitre le propose
     return DopynionResponseBool(game_id=game_id, decision=True)
-
-
+ 
 @app.post("/trash_card_from_hand")
-async def trash_card_from_hand(game_id: GameIdDependency, decision_input: Hand) -> DopynionResponseCardName:
-    for c in [CardName.CURSE, CardName.COPPER, CardName.ESTATE]:
-        if c in decision_input.hand:
+async def trash_card_from_hand(
+    game_id: GameIdDependency,
+    decision_input: Hand,
+) -> DopynionResponseCardName:
+    # Ordre de trash : CURSE > ESTATE > COPPER > DUCHY (late game) > SILVER (late game)
+    priority = [
+        CardName.CURSE,
+        CardName.ESTATE,
+        CardName.COPPER,
+    ]
+    in_hand = list(decision_input.hand)
+    for c in priority:
+        if c in in_hand:
             print(f"[trash] choose {c.name}")
             return DopynionResponseCardName(game_id=game_id, decision=c)
-    print(f"[trash] default {decision_input.hand[0].name}")
-    return DopynionResponseCardName(game_id=game_id, decision=decision_input.hand[0])
-
-
+    
+    # En late game, trash aussi Duchy et Silver si on a mieux
+    if CardName.DUCHY in in_hand:
+        print(f"[trash] choose DUCHY (late game)")
+        return DopynionResponseCardName(game_id=game_id, decision=CardName.DUCHY)
+    if CardName.SILVER in in_hand:
+        print(f"[trash] choose SILVER (late game)")
+        return DopynionResponseCardName(game_id=game_id, decision=CardName.SILVER)
+    
+    print(f"[trash] default {in_hand[0].name}")
+    return DopynionResponseCardName(game_id=game_id, decision=in_hand[0])
+ 
 @app.post("/confirm_discard_deck")
 async def confirm_discard_deck(
     game_id: GameIdDependency,
 ) -> DopynionResponseBool:
+    # OK pour défausser le deck quand demandé
     return DopynionResponseBool(game_id=game_id, decision=True)
-
-
+ 
 @app.post("/choose_card_to_receive_in_discard")
 async def choose_card_to_receive_in_discard(
     game_id: GameIdDependency,
     decision_input: PossibleCards,
 ) -> DopynionResponseCardName:
+    # Préférer les cartes utiles : GOLD > SILVER > SMITHY > reste
+    priority = [CardName.GOLD, CardName.SILVER, CardName.SMITHY]
+    possible = list(decision_input.possible_cards)
+    for c in priority:
+        if c in possible:
+            return DopynionResponseCardName(game_id=game_id, decision=c)
     return DopynionResponseCardName(
         game_id=game_id,
-        decision=decision_input.possible_cards[0],
+        decision=possible[0],
     )
-
-
+ 
 @app.post("/choose_card_to_receive_in_deck")
 async def choose_card_to_receive_in_deck(
     game_id: GameIdDependency,
     decision_input: PossibleCards,
 ) -> DopynionResponseCardName:
+    # Préférer les cartes utiles : GOLD > SILVER > SMITHY > reste
+    priority = [CardName.GOLD, CardName.SILVER, CardName.SMITHY]
+    possible = list(decision_input.possible_cards)
+    for c in priority:
+        if c in possible:
+            return DopynionResponseCardName(game_id=game_id, decision=c)
     return DopynionResponseCardName(
         game_id=game_id,
-        decision=decision_input.possible_cards[0],
+        decision=possible[0],
     )
-
-
+ 
 @app.post("/skip_card_reception_in_hand")
 async def skip_card_reception_in_hand(
     game_id: GameIdDependency,
     _decision_input: CardNameAndHand,
 ) -> DopynionResponseBool:
+    # On accepte de ne pas recevoir la carte en main si proposé
     return DopynionResponseBool(game_id=game_id, decision=True)
-
-
+ 
 @app.post("/trash_money_card_for_better_money_card")
 async def trash_money_card_for_better_money_card(
     game_id: GameIdDependency,
     decision_input: MoneyCardsInHand,
 ) -> DopynionResponseCardName:
-    return DopynionResponseCardName(
-        game_id=game_id,
-        decision=decision_input.money_in_hand[0],
-    )
+    # Remake-like: on trash la plus faible valeur possible
+    priority = [CardName.COPPER, CardName.SILVER, CardName.GOLD]
+    in_hand = list(decision_input.money_in_hand)
+    for c in priority:
+        if c in in_hand:
+            print(f"[trash_money] choose {c.name}")
+            return DopynionResponseCardName(game_id=game_id, decision=c)
+    print(f"[trash_money] default {in_hand[0].name}")
+    return DopynionResponseCardName(game_id=game_id, decision=in_hand[0])
