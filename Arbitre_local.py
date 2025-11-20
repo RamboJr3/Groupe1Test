@@ -456,59 +456,497 @@ class DominionGame:
 # ================================================================
 
 class StratRhumRuin:
-    def play_action(self, p, g):
-        priority = [
-            "MARKET", "LABORATORY", "VILLAGE", "FESTIVAL",
-            "HIRELING", "WITCH", "SMITHY", "WOODCUTTER",
+    """
+    Version classe pour le moteur DominionGame, dérivée de ta deuxième strat.
+
+    Philosophie :
+    - Moteur léger Village/Market/Laboratory/Festival/Hireling.
+    - Witch agressive pendant la phase Curses.
+    - HIRELING en priorité à 6$ en mid/late.
+    - Gestion Duchy agressive si retard ou fin de pile Province.
+    - Deny Village si un bot 'Equipe3' est à la table.
+    """
+
+    def __init__(self):
+        self.turn: int = 1
+        self.owned: Dict[str, int] = {}   # suivi des cartes achetées par ce bot
+
+    # ------------------------------------------------------------------
+    # Helpers internes
+    # ------------------------------------------------------------------
+    def _hand_counts(self, p: Player) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for c in p.hand:
+            counts[c] = counts.get(c, 0) + 1
+        return counts
+
+    def _has_in_hand(self, p: Player, card_name: str) -> bool:
+        return card_name in p.hand
+
+    # ------------------------------------------------------------------
+    # PHASE ACTION
+    # ------------------------------------------------------------------
+    def play_action(self, p: Player, g: Game) -> Optional[str]:
+        """
+        Retourne le nom de la carte Action à jouer, ou None.
+        Le moteur DominionGame appliquera ensuite CARDS[chosen].action.
+        """
+        if p.actions <= 0:
+            return None
+
+        # priority tuned for engine-first but allow attacking (WITCH) after +actions
+        action_priority = [
+            "MARKET",      # +1 carte, +1 action, +1 buy, +1$
+            "LABORATORY",  # +2 cartes, +1 action
+            "VILLAGE",     # +2 actions, +1 carte
+            "FESTIVAL",    # +2 actions, +1 buy, +2$
+            "HIRELING",    # terminal draw continu
+            "WITCH",       # attaque
+            "SMITHY",      # +3 cartes
+            "WOODCUTTER",  # +1 buy, +2$
         ]
-        for c in priority:
-            if c in p.hand and p.actions > 0:
-                return c
+
+        for name in action_priority:
+            if name in CARDS and self._has_in_hand(p, name):
+                return name
+
         return None
 
-    def buy(self, p, g):
+    # ------------------------------------------------------------------
+    # PHASE ACHAT
+    # ------------------------------------------------------------------
+    def buy(self, p: Player, g: Game) -> Optional[str]:
+        """
+        Retourne le nom de la carte à acheter, ou None.
+        """
         money = p.coins
         stock = g.stock
 
-        def ok(x):
-            return stock.get(x,0)>0 and CARDS[x].cost <= money
+        def can_buy(name: str) -> bool:
+            return (
+                name in CARDS
+                and stock.get(name, 0) > 0
+                and CARDS[name].cost <= money
+            )
 
-        if ok("PROVINCE"): return "PROVINCE"
-        if ok("WITCH"): return "WITCH"
-        if ok("HIRELING"): return "HIRELING"
-        if ok("MARKET"): return "MARKET"
-        if ok("LABORATORY"): return "LABORATORY"
-        if ok("GOLD"): return "GOLD"
-        if ok("VILLAGE"): return "VILLAGE"
-        if ok("DUCHY") and stock["PROVINCE"] <= 4: return "DUCHY"
-        if ok("SILVER"): return "SILVER"
+        # infos de game
+        prov_left = stock.get("PROVINCE", 0)
+        curses_left = stock.get("CURSE", 0)
+        villages_left = stock.get("VILLAGE", 0)
+
+        my_score = getattr(p, "score", 0) or 0
+        max_opp_score = max(
+            (getattr(op, "score", 0) or 0)
+            for op in g.players
+            if op is not p
+        ) if g.players else 0
+
+        # mode Duchy agressif si peu de Provinces ou gros retard au score
+        AGGRO_DUCHY = (prov_left <= 4) or ((max_opp_score - my_score) >= 4)
+
+        # détection d'un bot 'Equipe3' en face (pour deny Village)
+        enemy_alive = any(
+            "equipe3" in (getattr(op, "name", "") or "").lower()
+            for op in g.players
+            if op is not p
+        )
+
+        # comptages internes (approx) des cartes possédées par cette strat
+        vg_cnt = self.owned.get("VILLAGE", 0)
+        mk_cnt = self.owned.get("MARKET", 0)
+        sm_cnt = self.owned.get("SMITHY", 0)
+        wt_cnt = self.owned.get("WITCH", 0)
+        lab_cnt = self.owned.get("LABORATORY", 0)
+        gd_cnt = self.owned.get("GOLD", 0)
+        rc_cnt = self.owned.get("HIRELING", 0)
+
+        turn_no = self.turn
+
+        chosen: Optional[str] = None
+
+        # ===== 0) Province si possible (toujours)
+        if can_buy("PROVINCE"):
+            chosen = "PROVINCE"
+
+        # ===== 1) EARLY GAME — installation Witch / HIRELING / Market / Gold
+        elif turn_no <= 8:
+            # 1a) Si aucune Witch et des Curses restent: Witch d'abord
+            if curses_left > 0 and wt_cnt < 1 and can_buy("WITCH"):
+                chosen = "WITCH"
+
+            # 1b) À 6$ : HIRELING > GOLD (cap 2 en early)
+            elif can_buy("HIRELING") and rc_cnt < 2:
+                chosen = "HIRELING"
+
+            # 1c) À 5$ : Market (cap 2)
+            elif can_buy("MARKET") and mk_cnt < 2:
+                chosen = "MARKET"
+
+            # 1d) Gold (cap 1 en early)
+            elif can_buy("GOLD") and gd_cnt < 1:
+                chosen = "GOLD"
+
+            # 1e) Silver par défaut
+            elif can_buy("SILVER"):
+                chosen = "SILVER"
+
+        # ===== 2) MID GAME — spam Witch + moteur + deny Village
+        if not chosen and curses_left > 0:
+            # 2a) 2e/3e Witch (cap 3 si l’adversaire manque de Villages)
+            cap_witch = 3 if (enemy_alive and villages_left <= 7) else 2
+            if can_buy("WITCH") and wt_cnt < cap_witch:
+                chosen = "WITCH"
+
+            # 2b) Stabilité: Market puis Laboratory (cap 2 chacun)
+            elif can_buy("MARKET") and mk_cnt < 2:
+                chosen = "MARKET"
+            elif can_buy("LABORATORY") and lab_cnt < 2:
+                chosen = "LABORATORY"
+
+            # 2c) HIRELING à 6$ (cap 3 global)
+            elif can_buy("HIRELING") and rc_cnt < 3:
+                chosen = "HIRELING"
+
+            # 2d) Deny Village (cap 2 chez nous)
+            elif enemy_alive and villages_left > 0 and vg_cnt < 2 and can_buy("VILLAGE"):
+                chosen = "VILLAGE"
+
+        # ===== 3) FIN DES CURSES — convertir l’avantage
+        if not chosen and curses_left == 0 and enemy_alive and villages_left <= 2:
+            if can_buy("PROVINCE"):
+                chosen = "PROVINCE"
+            elif AGGRO_DUCHY and can_buy("DUCHY"):
+                chosen = "DUCHY"
+
+        # ===== 4) PLAN STANDARD (fallback)
+        if not chosen:
+            # Province
+            if can_buy("PROVINCE"):
+                chosen = "PROVINCE"
+
+            # Duchy si rattrapage / fin
+            elif AGGRO_DUCHY and can_buy("DUCHY"):
+                chosen = "DUCHY"
+
+            # À 6$ : HIRELING (cap 3) > GOLD (cap 2)
+            elif can_buy("HIRELING") and rc_cnt < 3:
+                chosen = "HIRELING"
+            elif can_buy("GOLD") and gd_cnt < 2:
+                chosen = "GOLD"
+
+            # À 5$ : Market (cap 2) > Laboratory (cap 2) > Witch (si Curses restent et < 2)
+            elif can_buy("MARKET") and mk_cnt < 2:
+                chosen = "MARKET"
+            elif can_buy("LABORATORY") and lab_cnt < 2:
+                chosen = "LABORATORY"
+            elif curses_left > 0 and can_buy("WITCH") and wt_cnt < 2:
+                chosen = "WITCH"
+
+            # À 4$ : Smithy (cap 2) seulement si on a déjà +Actions
+            elif can_buy("SMITHY") and (vg_cnt + mk_cnt) >= 1 and sm_cnt < 2:
+                chosen = "SMITHY"
+
+            # À 3$ : Silver
+            elif can_buy("SILVER"):
+                chosen = "SILVER"
+
+            # Duchy opportuniste (si jamais rien d’autre)
+            elif can_buy("DUCHY"):
+                chosen = "DUCHY"
+
+            # Estate tardif
+            elif turn_no > 10 and can_buy("ESTATE"):
+                chosen = "ESTATE"
+
+        # Mise à jour de l'état interne
+        if chosen:
+            self.owned[chosen] = self.owned.get(chosen, 0) + 1
+            self.turn += 1
+            return chosen
+
+        # Si vraiment rien
+        self.turn += 1
         return None
 
-    # MÉTHODES PAR DÉFAUT
-    def artificer_discard(self, p, g): return []
-    def gain_cost(self, p, g, cost): return None
-    def remake_trash(self, p, g): return None
-    def chancellor_discard(self, p, g): return False
 
 class StratGinTeRuine:
-    def play_action(self, p, g): return None
+    """
+    Portage local de ta grosse strat (Witch/Militia/Bandit/Bureaucrat + modes BigMoney/Engine/Gardens)
+    vers le moteur DominionGame :
+      - play_action(self, p, g)
+      - buy(self, p, g)
 
-    def buy(self, p, g):
-        m = p.coins
-        s = g.stock
-        def ok(x):
-            return s.get(x,0)>0 and CARDS[x].cost <= m
-        if ok("PROVINCE"): return "PROVINCE"
-        if m>=5 and ok("DUCHY"): return "DUCHY"
-        if m>=6 and ok("GOLD"): return "GOLD"
-        if m>=3 and ok("SILVER"): return "SILVER"
+    Hypothèses :
+      - Les cartes sont des strings ("COPPER", "PROVINCE", "WITCH", etc.)
+      - Les coûts viennent de CARDS[card].cost
+      - Les pièces disponibles sont dans p.coins au moment du buy()
+      - On estime notre deck par deck+main+défausse+in_play
+    """
+
+    PROV_THRESHOLD = 4      # seuil de "fin de game" sur Provinces
+    SCORE_DELTA    = 6      # écart de score pour considérer qu'on est derrière
+    FULL_PILE      = 10     # taille standard des piles royaume (hors Provinces/Curses)
+
+    # ==========================
+    #   PHASE ACTION
+    # ==========================
+    def play_action(self, p, g):
+        hand = p.hand
+        stock = g.stock
+
+        # helper simple
+        def has(card: str) -> bool:
+            return card in hand
+
+        # Militia éventuellement présente dans le set de cartes
+        militia_card = "MILITIA" if "MILITIA" in CARDS else None
+
+        # nb de Curses restantes
+        curses_left = stock.get("CURSE", 0) if "CURSE" in stock else 0
+
+        # ordre des terminaux en fonction du contexte
+        if militia_card:
+            if curses_left > 0:
+                terminal_order = ["WITCH", militia_card, "SMITHY"]
+            else:
+                terminal_order = [militia_card, "WITCH", "SMITHY"]
+        else:
+            terminal_order = ["WITCH", "SMITHY"]
+
+        # priorité actions :
+        action_priority = [
+            # moteurs non-terminaux
+            "MARKET",        # +1 carte, +1 action, +1 buy, +1$
+            "LABORATORY",    # +2 cartes, +1 action
+            "VILLAGE",       # +2 actions, +1 carte
+            "FESTIVAL",      # +2 actions, +1 buy, +2$
+
+            # terminaux contextuels
+            *terminal_order,
+
+            # cartes de nuisance / utilitaires
+            "BUREAUCRAT" if "BUREAUCRAT" in CARDS else None,
+            "BANDIT" if "BANDIT" in CARDS else None,
+            "CHANCELLOR" if "CHANCELLOR" in CARDS else None,
+            "WOODCUTTER",
+        ]
+        action_priority = [c for c in action_priority if c is not None]
+
+        # on choisit la première action de la liste présente en main
+        if p.actions > 0:
+            for card in action_priority:
+                if card in hand and CARDS[card].type in ("ACTION", "ATTACK"):
+                    return card  # le moteur jouera l’effet automatiquement
+
         return None
 
-    # MÉTHODES PAR DÉFAUT
-    def artificer_discard(self, p, g): return []
-    def gain_cost(self, p, g, cost): return None
-    def remake_trash(self, p, g): return None
-    def chancellor_discard(self, p, g): return False
+    # ==========================
+    #   PHASE ACHAT
+    # ==========================
+    def buy(self, p, g):
+        stock = g.stock
+        money = p.coins
+        players = g.players
+
+        # -------- helpers locaux --------
+        def can_buy(card: str) -> bool:
+            return (
+                card in CARDS
+                and stock.get(card, 0) > 0
+                and CARDS[card].cost <= money
+            )
+
+        def owned(p_local: "Player", card: str) -> int:
+            return (
+                p_local.deck.count(card)
+                + p_local.hand.count(card)
+                + p_local.discard.count(card)
+                + p_local.in_play.count(card)
+            )
+
+        def deck_size(p_local: "Player") -> int:
+            return (
+                len(p_local.deck)
+                + len(p_local.hand)
+                + len(p_local.discard)
+                + len(p_local.in_play)
+            )
+
+        # -------- infos globales --------
+        prov_left = stock.get("PROVINCE", 0)
+        curses_left = stock.get("CURSE", 0) if "CURSE" in stock else 0
+        gardens_left = stock.get("GARDENS", 0) if "GARDENS" in CARDS else 0
+
+        my_score = getattr(p, "score", 0) or 0
+        max_opp_score = 0
+        for opp in players:
+            if opp is p:
+                continue
+            sc = getattr(opp, "score", 0) or 0
+            if sc > max_opp_score:
+                max_opp_score = sc
+
+        score_lead = my_score - max_opp_score
+        is_ahead = score_lead > 0
+        is_behind = score_lead < 0
+
+        dsz = deck_size(p)
+        enemy_equipe3 = any(
+            "equipe3" in (getattr(op, "name", "") or "").lower()
+            for op in players
+            if op is not p
+        )
+
+        # Comptes de nos cartes clés
+        vg_cnt  = owned(p, "VILLAGE")
+        mk_cnt  = owned(p, "MARKET")
+        sm_cnt  = owned(p, "SMITHY")
+        wt_cnt  = owned(p, "WITCH")
+        lab_cnt = owned(p, "LABORATORY")
+        gd_cnt  = owned(p, "GOLD")
+        pr_cnt  = owned(p, "PROVINCE")
+        fest_cnt = owned(p, "FESTIVAL") if "FESTIVAL" in CARDS else 0
+        hr_cnt  = owned(p, "HIRELING") if "HIRELING" in CARDS else 0
+        bu_cnt  = owned(p, "BUREAUCRAT") if "BUREAUCRAT" in CARDS else 0
+        bd_cnt  = owned(p, "BANDIT") if "BANDIT" in CARDS else 0
+        mi_cnt  = owned(p, "MILITIA") if "MILITIA" in CARDS else 0
+        ga_cnt  = owned(p, "GARDENS") if "GARDENS" in CARDS else 0
+
+        # Piles restantes (pour détection de mode adverse)
+        labs_left     = stock.get("LABORATORY", 0) if "LABORATORY" in stock else 0
+        markets_left  = stock.get("MARKET", 0) if "MARKET" in stock else 0
+        festival_left = stock.get("FESTIVAL", 0) if "FESTIVAL" in stock else 0
+        villages_left = stock.get("VILLAGE", 0) if "VILLAGE" in stock else 0
+
+        FULL = self.FULL_PILE
+
+        # Modes adverses estimés
+        BIGMONEY_MODE   = (
+            villages_left >= 8
+            and labs_left >= 9
+            and markets_left >= 9
+            and curses_left == FULL
+        )
+        ENGINE_MODE     = (
+            (villages_left <= 7) or (labs_left <= 8) or (markets_left <= 8)
+        )
+        WITCH_SPAM_MODE = (curses_left <= FULL - 10)
+        MILITIA_LOCK    = (festival_left <= 8 and curses_left == FULL)
+        GARDENS_RACE    = (gardens_left > 0 and gardens_left < FULL)
+
+        # -----------------------------------
+        # STRATS DÉRIVÉES (S1..S7)
+        # -----------------------------------
+
+        # S1: Anti-BigMoney Rush
+        if BIGMONEY_MODE:
+            if can_buy("PROVINCE") and (prov_left <= 6 or my_score >= max_opp_score):
+                return "PROVINCE"
+            if gd_cnt < 2 and can_buy("GOLD"):
+                return "GOLD"
+            if "MILITIA" in CARDS and mi_cnt < 1 and can_buy("MILITIA"):
+                return "MILITIA"
+            if curses_left == FULL and wt_cnt < 2 and can_buy("WITCH"):
+                return "WITCH"
+            if can_buy("SILVER"):
+                return "SILVER"
+
+        # S2: Engine-Crush (deny Village + Bandit tôt)
+        if ENGINE_MODE:
+            if villages_left > 0 and vg_cnt < 2 and can_buy("VILLAGE"):
+                return "VILLAGE"
+            if "MILITIA" in CARDS:
+                plus_actions = vg_cnt + fest_cnt + mk_cnt
+                cap_mi = 2 if plus_actions >= 2 else 1
+                if mi_cnt < cap_mi and can_buy("MILITIA"):
+                    return "MILITIA"
+            if bd_cnt < 1 and can_buy("BANDIT" if "BANDIT" in CARDS else "GOLD"):
+                return "BANDIT" if "BANDIT" in CARDS else "GOLD"
+            if mk_cnt < 2 and can_buy("MARKET"):
+                return "MARKET"
+            if lab_cnt < 3 and can_buy("LABORATORY"):
+                return "LABORATORY"
+            if gd_cnt < 2 and can_buy("GOLD"):
+                return "GOLD"
+            if can_buy("PROVINCE"):
+                return "PROVINCE"
+
+        # S3: Hybrid Witch->Gold (opening générique)
+        if curses_left > 0 and wt_cnt < 2 and can_buy("WITCH"):
+            return "WITCH"
+        if mk_cnt < 2 and can_buy("MARKET"):
+            return "MARKET"
+        if lab_cnt < 2 and can_buy("LABORATORY"):
+            return "LABORATORY"
+        if gd_cnt < 2 and can_buy("GOLD"):
+            return "GOLD"
+
+        # S4: Anti Witch-Spam
+        if WITCH_SPAM_MODE:
+            if mk_cnt < 2 and can_buy("MARKET"):
+                return "MARKET"
+            if lab_cnt < 3 and can_buy("LABORATORY"):
+                return "LABORATORY"
+            if (
+                "MILITIA" in CARDS
+                and mi_cnt < 1
+                and (vg_cnt + fest_cnt + mk_cnt) >= 1
+                and can_buy("MILITIA")
+            ):
+                return "MILITIA"
+            if gd_cnt < 2 and can_buy("GOLD"):
+                return "GOLD"
+
+        # S5: Anti Militia-Lock
+        if MILITIA_LOCK:
+            if "FESTIVAL" in CARDS and fest_cnt < 2 and can_buy("FESTIVAL"):
+                return "FESTIVAL"
+            if "MILITIA" in CARDS:
+                cap_mi = 2 if (vg_cnt + fest_cnt + mk_cnt) >= 2 else 1
+                if mi_cnt < cap_mi and can_buy("MILITIA"):
+                    return "MILITIA"
+            if mk_cnt < 2 and can_buy("MARKET"):
+                return "MARKET"
+            if lab_cnt < 2 and can_buy("LABORATORY"):
+                return "LABORATORY"
+
+        # friction quand on est derrière : une Militia / Bandit si possible
+        plus_actions = vg_cnt + fest_cnt + mk_cnt
+        if is_behind and "MILITIA" in CARDS and mi_cnt < 1 and plus_actions >= 1 and can_buy("MILITIA"):
+            return "MILITIA"
+        if is_behind and bd_cnt < 1 and can_buy("BANDIT" if "BANDIT" in CARDS else "GOLD"):
+            return "BANDIT" if "BANDIT" in CARDS else "GOLD"
+
+        # S6: Late-Gardens Counter (si derrière et deck large)
+        if "GARDENS" in CARDS and gardens_left > 0:
+            gardens_value = dsz // 10
+            gardens_cap   = min(6, gardens_value)  # max 6
+            if is_behind and dsz >= 30 and prov_left >= 5 and ga_cnt < gardens_cap:
+                if not can_buy("PROVINCE"):
+                    # Duchy = 3 VP ; Garden value >=3/4
+                    if can_buy("DUCHY"):
+                        if gardens_value >= 4 and can_buy("GARDENS"):
+                            return "GARDENS"
+                    else:
+                        if gardens_value >= 3 and can_buy("GARDENS"):
+                            return "GARDENS"
+
+        # S7: Safe BM fallback & endgame
+        if prov_left <= 4 and can_buy("PROVINCE"):
+            return "PROVINCE"
+        if gd_cnt < 2 and can_buy("GOLD"):
+            return "GOLD"
+        if can_buy("PROVINCE"):
+            return "PROVINCE"
+        if prov_left <= 4 and can_buy("DUCHY"):
+            return "DUCHY"
+        if can_buy("SILVER"):
+            return "SILVER"
+
+        # fallback extrême : rien à acheter
+        return None
+
+
 
 # ================================================================
 # SIMULATEUR DE PARTIES — 10 000 PARTIES AUTOMATIQUES
