@@ -208,15 +208,18 @@ def start_game(game_id: GameIdDependency) -> DopynionResponseStr:
 @app.get("/start_turn")
 def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
     init_turn_state(game_id)
-    s = SESS.setdefault(game_id, {"owned": {}, "turn": 0})
+    s = get_turn_state(game_id)
+
     s["turn"] = s.get("turn", 0) + 1
-    
-    # === CORRECTIF ECONOMIE ===
-    s["spent"] = 0
-    SESS[game_id]["spent"] = 0
-    # ==========================
+
+    # === Correctif ÉCONOMIE (vraie variable utilisée partout) ===
+    s["coins_spent"] = 0
+    # Bonus éventuels remis à zéro aussi (ton moteur n'est pas robuste sinon)
+    s["coins_bonus"] = 0
+    # ==========================================================
 
     return DopynionResponseStr(game_id=game_id, decision="OK")
+
 
  
 #####################################################
