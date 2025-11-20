@@ -207,10 +207,17 @@ def start_game(game_id: GameIdDependency) -> DopynionResponseStr:
  
 @app.get("/start_turn")
 def start_turn(game_id: GameIdDependency) -> DopynionResponseStr:
-    init_turn_state(game_id)
-    s = SESS.setdefault(game_id, {"owned": {}, "turn": 0})
-    s["turn"] = s.get("turn", 0) + 1
+    # On force un reset propre du tour
+    SESS.setdefault(game_id, {"owned": {}, "turn": 0})
+
+    SESS[game_id]["actions"] = 1
+    SESS[game_id]["buys"] = 1
+    SESS[game_id]["coins_bonus"] = 0
+    SESS[game_id]["coins_spent"] = 0   # <-- critique
+    SESS[game_id]["turn"] = SESS[game_id].get("turn", 0) + 1
+
     return DopynionResponseStr(game_id=game_id, decision="OK")
+
  
 #####################################################
 # STRATÉGIE PRINCIPALE : RUIN LA PROMO
