@@ -64,18 +64,16 @@ def owned(game_id: str, card: CardName) -> int:
  
 # --- COÛTS DES CARTES ---
 COST = {
-    # Trésors / Victoire
+    # Trésors
     CardName.COPPER: 0,
     CardName.SILVER: 3,
     CardName.GOLD: 6,
+    CardName.PLATINUM: 9,
+    # Victoire
     CardName.ESTATE: 2,
     CardName.DUCHY: 5,
     CardName.PROVINCE: 8,
-    CardName.CURSE: 0,
-    # Prosperity
-    getattr(CardName, "COLONY", None): 11 if hasattr(CardName, "COLONY") else None,
-    # Trésor spécial
-    getattr(CardName, "CURSED_GOLD", None): 4 if hasattr(CardName, "CURSED_GOLD") else None,
+    CardName.COLONY: 11,
     # Actions classiques
     CardName.FESTIVAL: 5,
     CardName.LABORATORY: 5,
@@ -85,24 +83,27 @@ COST = {
     CardName.MARKET: 5,
     CardName.WITCH: 5,
     CardName.HIRELING: 6,
-    # Actions supplémentaires
-    getattr(CardName, "COUNCILROOM", None): 5 if hasattr(CardName, "COUNCILROOM") else None,
-    getattr(CardName, "DISTANTSHORE", None): 6 if hasattr(CardName, "DISTANTSHORE") else None,
-    getattr(CardName, "FARMINGVILLAGE", None): 4 if hasattr(CardName, "FARMINGVILLAGE") else None,
-    getattr(CardName, "BANDIT", None): 5 if hasattr(CardName, "BANDIT") else None,
-    getattr(CardName, "BUREAUCRAT", None): 4 if hasattr(CardName, "BUREAUCRAT") else None,
-    getattr(CardName, "CHANCELLOR", None): 3 if hasattr(CardName, "CHANCELLOR") else None,
-    getattr(CardName, "GARDENS", None): 4 if hasattr(CardName, "GARDENS") else None,
-    getattr(CardName, "MILITIA", None): 4 if hasattr(CardName, "MILITIA") else None,
-    getattr(CardName, "ARTIFICER", None): 5 if hasattr(CardName, "ARTIFICER") else None,
-    getattr(CardName, "MARQUIS", None): 6 if hasattr(CardName, "MARQUIS") else None,
-    getattr(CardName, "POACHER", None): 4 if hasattr(CardName, "POACHER") else None,
-    getattr(CardName, "HARVEST", None): 5 if hasattr(CardName, "HARVEST") else None,
-    getattr(CardName, "MAGPIE", None): 4 if hasattr(CardName, "MAGPIE") else None,
-    getattr(CardName, "PORT", None): 4 if hasattr(CardName, "PORT") else None,
-    getattr(CardName, "REMAKE", None): 4 if hasattr(CardName, "REMAKE") else None,
-    getattr(CardName, "CHAPEL", None): 2 if hasattr(CardName, "CHAPEL") else None,
-    getattr(CardName, "THIEF", None): 6 if hasattr(CardName, "THIEF") else None,
+    CardName.CURSEDGOLD: 4,
+    CardName.COUNCILROOM: 5,
+    CardName.DISTANTSHORE: 6,
+    CardName.FARMINGVILLAGE: 4,
+    CardName.CHANCELLOR: 3,
+    CardName.MILITIA: 4,
+    CardName.BANDIT: 5,
+    CardName.BUREAUCRAT: 4,
+    CardName.ARTIFICER: 5,
+    CardName.MARQUIS: 6,
+    CardName.POACHER: 4,
+    CardName.HARVEST: 5,
+    CardName.MAGPIE: 4,
+    CardName.PORT: 4,
+    CardName.WORKSHOP: 3,
+    CardName.REMAKE: 4,
+    CardName.GARDENS: 4,
+    CardName.CURSE: 0,
+    CardName.CHAPEL: 2,
+    CardName.THIEF: 6,
+    # --- Nouvelles cartes support/attaques (si existantes dans l'enum) ---
 }
 # Nettoyage: enlever les clés None éventuelles
 COST = {k: v for k, v in COST.items() if k is not None}
@@ -117,9 +118,9 @@ EFFECTS: dict[str, tuple[int, int, int, int]] = {
     "MARKET":         (1, 1, 1, 1),
     "WITCH":          (0, 0, 0, 2),
     "HIRELING":       (0, 0, 0, 0),
-    "COUNCILROOM":   (0, 1, 0, 4),
-    "DISTANTSHORE":  (1, 0, 0, 2),
-    "FARMINGVILLAGE":(2, 0, 0, 1),
+    "COUNCILROOM":    (0, 1, 0, 4),
+    "DISTANTSHORE":   (1, 0, 0, 2),
+    "FARMINGVILLAGE": (2, 0, 0, 1),
     "BANDIT":         (0, 0, 0, 0),
     "BUREAUCRAT":     (0, 0, 0, 0),
     "CHANCELLOR":     (0, 0, 2, 0),
@@ -128,11 +129,14 @@ EFFECTS: dict[str, tuple[int, int, int, int]] = {
     "MARQUIS":        (0, 1, 0, 0),
     "POACHER":        (1, 0, 1, 1),
     "HARVEST":        (0, 0, 0, 0),
-    "MAGPIE":        (1, 0, 0, 1),
+    "MAGPIE":         (1, 0, 0, 1),
     "PORT":           (1, 0, 0, 1),
     "REMAKE":         (0, 0, 0, 0),
     "CHAPEL":         (0, 0, 0, 0),
     "THIEF":          (0, 0, 0, 0),
+    "WORKSHOP":       (0, 0, 0, 0),
+    "CURSEDGOLD":     (0, 0, 0, 0),
+    "CURSE":          (0, 0, 0, 0),
 }
  
 #####################################################
@@ -321,17 +325,27 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     # BRANCHE 2 JOUEURS : STRAT RUIN LA PROMO (VincentBM / 2J)
     # =====================================================================
     if num_players == 2:
-        # === PHASE ACTION ===
+    # === PHASE ACTION ===
         if ts.get("actions", 0) > 0:
-            action_card = decide_action(hand, stock, num_players, ts)
-            if action_card:
-                print(f"[play_action] game={game_id} ACTION {action_card}")
-                # Appliquer les effets de l'action
-                effects = EFFECTS.get(action_card, (0, 0, 0, 0))
-                ts["actions"] += effects[0] - 1  # -1 pour l'action jouée
-                ts["buys"] += effects[1]
-                ts["coins_bonus"] += effects[2]
-                return DopynionResponseStr(game_id=game_id, decision=f"ACTION {action_card}")
+            act = decide_action(hand, stock, num_players, ts)
+
+            if act:  # act est un CardName
+                print(f"[play_action] game={game_id} ACTION {act.name}")
+
+                # Appliquer les effets si connus
+                if act.name in EFFECTS:
+                    add_actions, add_buys, add_coins, _ = EFFECTS[act.name]
+
+                    ts["actions"] -= 1      # on dépense 1 action
+                    ts["actions"] += add_actions
+                    ts["buys"] += add_buys
+                    ts["coins_bonus"] += add_coins
+
+                return DopynionResponseStr(
+                    game_id=game_id,
+                    decision=f"ACTION {act.name}"
+                )
+
 
         # === PHASE ACHAT ===
         def money_available_2j() -> int:
@@ -341,13 +355,13 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             bonus = ts.get("coins_bonus", 0)
             spent = ts.get("coins_spent", 0)
 
-            cursed_gold_card = getattr(CardName, "CURSED_GOLD", None)
-            cursed_gold = hand.get(cursed_gold_card, 0) if cursed_gold_card else 0
+            CURSEDGOLD_card = getattr(CardName, "CURSEDGOLD", None)
+            CURSEDGOLD = hand.get(CURSEDGOLD_card, 0) if CURSEDGOLD_card else 0
 
-            result = copper * 1 + silver * 2 + gold * 3 + cursed_gold * 3 + bonus - spent
+            result = copper * 1 + silver * 2 + gold * 3 + CURSEDGOLD * 3 + bonus - spent
             print(
                 f"[money] game={game_id} copper={copper} silver={silver} gold={gold} "
-                f"cursed_gold={cursed_gold} bonus={bonus} spent={spent} => total={result}"
+                f"CURSEDGOLD={CURSEDGOLD} bonus={bonus} spent={spent} => total={result}"
             )
             return result
 
@@ -367,15 +381,23 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             return can
 
         def do_buy_2j(c: CardName) -> DopynionResponseStr:
-            cost = COST[c]
+            # Achat générique compatible Colony / Platinum
+            cost = COST.get(c, 999)
+
             ts["buys"] -= 1
             ts["coins_spent"] += cost
             inc_owned(game_id, c)
+
             print(
                 f"[buy] game={game_id} BUY {c.name} cost={cost} "
                 f"buys_left={ts['buys']} turn={ts.get('turn', 0)}"
             )
-            return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
+
+            return DopynionResponseStr(
+                game_id=game_id,
+                decision=f"BUY {c.name}"
+            )
+
 
         buy_decision = decide_buy(
             stock=stock,
