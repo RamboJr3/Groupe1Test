@@ -245,7 +245,7 @@ DOUBLE_PROVINCE_BUYS = 2      # nb de buys requis pour envisager double Province
 @app.post("/play")
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     ts = get_turn_state(game_id)
-
+    print(game)
     if ts.get("coins_spent", None) is None:
         ts["coins_spent"] = 0
     else:
