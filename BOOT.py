@@ -245,11 +245,6 @@ DOUBLE_PROVINCE_BUYS = 2      # nb de buys requis pour envisager double Province
 @app.post("/play")
 def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     ts = get_turn_state(game_id)
-    print(game)
-    if ts.get("coins_spent", None) is None:
-        ts["coins_spent"] = 0
-    else:
-        ts["coins_spent"] = 0
 
     # --- trouver "moi" ---
     me = next((p for p in game.players if p.hand is not None), None)
@@ -268,77 +263,91 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
 
     if num_players == 2:
 
-        def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
-            # --- trouver "moi" ---
-            me = next((p for p in game.players if p.hand is not None), None)
-            if not me or not me.hand:
+        # --- trouver "moi" ---
+        me = next((p for p in game.players if p.hand is not None), None)
+        if not me or not me.hand:
+            return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+
+        hand = me.hand.quantities
+        stock = game.stock.quantities
+        ts = get_turn_state(game_id)
+
+        # helpers
+        def hq(c: CardName) -> int: return hand.get(c, 0)
+        def in_stock(c: CardName) -> bool: return stock.get(c, 0) > 0
+        def money_treasures() -> int:
+            return hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3
+        def money_available() -> int:
+            # uniquement les trésors en main + bonus générés par les actions jouées ce tour-ci
+            return money_treasures() + ts["coins_bonus"] - ts["coins_spent"]
+
+
+        # --- Phase Achat : décisions renforcées ---
+        def can_buy(c: CardName) -> bool:
+            return ts["buys"] > 0 and stock.get(c, 0) and money_available() >= COST[c]
+
+        def do_buy(c: CardName) -> DopynionResponseStr:
+            cost = COST[c]
+
+            if money_available() < cost:
+                print("[ERROR] ACHAT IMPOSSIBLE, argent insuffisant")
                 return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
-            hand = me.hand.quantities
-            stock = game.stock.quantities
-            ts = get_turn_state(game_id)
+            ts["coins_spent"] += cost
+            ts["buys"] -= 1
+            inc_owned(game_id, c)
 
-            # helpers
-            def hq(c: CardName) -> int: return hand.get(c, 0)
-            def in_stock(c: CardName) -> bool: return stock.get(c, 0) > 0
-            def money_treasures() -> int:
-                return hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3
-            def money_available() -> int:
-                return money_treasures() + ts["coins_bonus"] - ts["coins_spent"]
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
 
-            # --- Phase Achat : décisions renforcées ---
-            def can_buy(c: CardName) -> bool:
-                return ts["buys"] > 0 and stock.get(c, 0) and money_available() >= COST[c]
+        my_score = getattr(me, "score", 0) or 0
+        max_opponent_score = max(
+            (getattr(p, "score", 0) or 0)
+            for p in game.players
+            if p is not me
+        )
 
-            def do_buy(c: CardName) -> DopynionResponseStr:
-                cost = COST[c]
-                ts["buys"] -= 1
-                ts["coins_spent"] += cost
-                inc_owned(game_id, c)
-                return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
+        # --- Décision d'achat améliorée ---
+        if ts["buys"] > 0:
+            prov_left = stock.get(CardName.PROVINCE, 0)
+            curses_left = stock.get(CardName.CURSE, 0) if CardName.CURSE in stock else 0
 
-            # --- Décision d'achat améliorée ---
-            if ts["buys"] > 0:
-                prov_left = stock.get(CardName.PROVINCE, 0)
-                curses_left = stock.get(CardName.CURSE, 0) if CardName.CURSE in stock else 0
+            # Agressive mode : si Provinces proches d'être épuisées ou si écart de score trop important
+            aggressive_mode = prov_left <= 4 or (max_opponent_score - my_score) >= 4
 
-                # Agressive mode : si Provinces proches d'être épuisées ou si écart de score trop important
-                aggressive_mode = prov_left <= 4 or (max_opponent_score - my_score) >= 4
+            # Achetez Province dès que possible si moteur prêt
+            if can_buy(CardName.PROVINCE) and not aggressive_mode:
+                return do_buy(CardName.PROVINCE)
 
-                # Achetez Province dès que possible si moteur prêt
-                if can_buy(CardName.PROVINCE) and not aggressive_mode:
-                    return do_buy(CardName.PROVINCE)
+            # --- Mode agressif : Duchy si écart important ---
+            if aggressive_mode:
+                if can_buy(CardName.DUCHY):
+                    return do_buy(CardName.DUCHY)
 
-                # --- Mode agressif : Duchy si écart important ---
-                if aggressive_mode:
-                    if can_buy(CardName.DUCHY):
-                        return do_buy(CardName.DUCHY)
+            # --- Achat de cartes puissantes ---
+            if can_buy(CardName.FESTIVAL):
+                return do_buy(CardName.FESTIVAL)
 
-                # --- Achat de cartes puissantes ---
-                if can_buy(CardName.FESTIVAL):
-                    return do_buy(CardName.FESTIVAL)
+            if can_buy(CardName.VILLAGE):
+                return do_buy(CardName.VILLAGE)
 
-                if can_buy(CardName.VILLAGE):
-                    return do_buy(CardName.VILLAGE)
+            # --- Contrôle du deck (achat de cartes comme Witch, Smithy) ---
+            if curses_left > 0 and can_buy(CardName.WITCH):
+                return do_buy(CardName.WITCH)
 
-                # --- Contrôle du deck (achat de cartes comme Witch, Smithy) ---
-                if curses_left > 0 and can_buy(CardName.WITCH):
-                    return do_buy(CardName.WITCH)
+            if can_buy(CardName.SMITHY):
+                return do_buy(CardName.SMITHY)
 
-                if can_buy(CardName.SMITHY):
-                    return do_buy(CardName.SMITHY)
+            # --- Achat de trésors pour accélérer ---
+            if can_buy(CardName.GOLD):
+                return do_buy(CardName.GOLD)
+            if can_buy(CardName.SILVER):
+                return do_buy(CardName.SILVER)
 
-                # --- Achat de trésors pour accélérer ---
-                if can_buy(CardName.GOLD):
-                    return do_buy(CardName.GOLD)
-                if can_buy(CardName.SILVER):
-                    return do_buy(CardName.SILVER)
+            # --- Priorité à l'achat de HIRELING pour renforcer les actions ---
+            if can_buy(CardName.HIRELING):
+                return do_buy(CardName.HIRELING)
 
-                # --- Priorité à l'achat de HIRELING pour renforcer les actions ---
-                if can_buy(CardName.HIRELING):
-                    return do_buy(CardName.HIRELING)
-
-            return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+        return DopynionResponseStr(game_id=game_id, decision="END_TURN")
 
 
     # =====================================================================
@@ -358,7 +367,9 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         )
 
     def money_available() -> int:
+        # uniquement les trésors en main + bonus générés par les actions jouées ce tour-ci
         return money_treasures() + ts["coins_bonus"] - ts["coins_spent"]
+
 
     # basic info
     prov_left = stock.get(CardName.PROVINCE, 0)
@@ -455,14 +466,17 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
 
     def do_buy(c: CardName) -> DopynionResponseStr:
         cost = COST[c]
-        ts["buys"] -= 1
+
+        if money_available() < cost:
+            print("[ERROR] ACHAT IMPOSSIBLE, argent insuffisant")
+            return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+
         ts["coins_spent"] += cost
+        ts["buys"] -= 1
         inc_owned(game_id, c)
-        print(
-            f"[buy] BUY {c.name} cost={cost} -> buys_left={ts['buys']} "
-            f"spent={ts['coins_spent']} avail_now={money_available()}"
-        )
+
         return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
+
 
     if ts["buys"] > 0:
         turn_no = SESS[game_id].get("turn", 1)
