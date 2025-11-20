@@ -330,11 +330,11 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             act = decide_action(hand, stock, num_players, ts)
 
             if act:  # act est un CardName
-                print(f"[play_action] game={game_id} ACTION {act.name}")
+                print(f"[play_action] game={game_id} ACTION {act}")
 
                 # Appliquer les effets si connus
                 if act.name in EFFECTS:
-                    add_actions, add_buys, add_coins, _ = EFFECTS[act.name]
+                    add_actions, add_buys, add_coins, _ = EFFECTS[act]
 
                     ts["actions"] -= 1      # on dépense 1 action
                     ts["actions"] += add_actions
@@ -343,7 +343,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
 
                 return DopynionResponseStr(
                     game_id=game_id,
-                    decision=f"ACTION {act.name}"
+                    decision=f"ACTION {act}"
                 )
 
 
@@ -374,7 +374,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             )
             if not can:
                 print(
-                    f"[can_buy] game={game_id} card={c.name} buys={ts['buys']} "
+                    f"[can_buy] game={game_id} card={c} buys={ts['buys']} "
                     f"in_cost={c in COST} in_stock={stock.get(c, 0)} "
                     f"money={money_available_2j()} cost={COST.get(c, '?')} => {can}"
                 )
@@ -389,13 +389,13 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             inc_owned(game_id, c)
 
             print(
-                f"[buy] game={game_id} BUY {c.name} cost={cost} "
+                f"[buy] game={game_id} BUY {c} cost={cost} "
                 f"buys_left={ts['buys']} turn={ts.get('turn', 0)}"
             )
 
             return DopynionResponseStr(
                 game_id=game_id,
-                decision=f"BUY {c.name}"
+                decision=f"BUY {c}"
             )
 
 
