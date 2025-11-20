@@ -239,13 +239,13 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     if ts.get("actions", 0) > 0:
         action_card = decide_action(hand, stock, num_players, ts)
         if action_card:
-            print(f"[play_action] game={game_id} PLAY {action_card}")
+            print(f"[play_action] game={game_id} ACTION {action_card}")
             # Appliquer les effets de l'action
             effects = EFFECTS.get(action_card, (0, 0, 0, 0))
             ts["actions"] += effects[0] - 1  # -1 pour l'action jouée
             ts["buys"] += effects[1]
             ts["coins_bonus"] += effects[2]
-            return DopynionResponseStr(game_id=game_id, decision=f"PLAY {action_card}")
+            return DopynionResponseStr(game_id=game_id, decision=f"ACTION {action_card}")
  
     # === PHASE ACHAT ===
     def money_available():
