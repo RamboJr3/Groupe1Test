@@ -45,7 +45,7 @@ COST = {
     CardName.COPPER: 0,
     CardName.SILVER: 3,
     CardName.GOLD: 6,
-    CardName.PLATINIUM: 9,
+    CardName.PLATINUM: 9,
     CardName.CURSED_GOLD: 4,
     CardName.ESTATE: 2,
     CardName.DUCHY: 5,
@@ -188,7 +188,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     def in_stock(c: CardName) -> bool: return stock.get(c, 0) > 0
     def money_treasures() -> int:
         return (hq(CardName.COPPER)*1 + hq(CardName.SILVER)*2 + hq(CardName.GOLD)*3 +
-                hq(CardName.PLATINIUM)*5 + hq(CardName.CURSED_GOLD)*3)
+                hq(CardName.PLATINUM)*5 + hq(CardName.CURSED_GOLD)*3)
     def money_available() -> int:
         return money_treasures() + ts["coins_bonus"] - ts["coins_spent"]
  
@@ -201,7 +201,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
  
     # quick deck_estimate from visible hand (cheap heuristic)
     # count actions and treasure density in hand to guess engine readiness
-    actions_in_hand = sum(1 for c in hand if c not in (CardName.COPPER, CardName.SILVER, CardName.GOLD, CardName.PLATINIUM, CardName.CURSED_GOLD,
+    actions_in_hand = sum(1 for c in hand if c not in (CardName.COPPER, CardName.SILVER, CardName.GOLD, CardName.PLATINUM, CardName.CURSED_GOLD,
                                                        CardName.ESTATE, CardName.DUCHY, CardName.PROVINCE, CardName.COLONY, CardName.CURSE) and hand[c] > 0)
     treasure_value = money_treasures()
  
@@ -267,23 +267,23 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
         if num_players == 2:
             print(f"[buy] BIG MONEY MODE (2 players) | turn={turn_no} money={money_available()}")
             
-            plat_cnt = owned(game_id, CardName.PLATINIUM)
+            plat_cnt = owned(game_id, CardName.PLATINUM)
             gold_cnt = owned(game_id, CardName.GOLD)
             
             # Priorité : construire une économie solide avant d'acheter des cartes victoire
-            # On vise 2-3 Platinium avant de commencer à acheter Colony/Province
+            # On vise 2-3 PLATINUM avant de commencer à acheter Colony/Province
             
-            # 1. Colony (11) si on a déjà au moins 2 Platinium
+            # 1. Colony (11) si on a déjà au moins 2 PLATINUM
             if plat_cnt >= 2 and can_buy(CardName.COLONY):
                 return do_buy(CardName.COLONY)
             
-            # 2. Province (8) si on a déjà au moins 2 Platinium
+            # 2. Province (8) si on a déjà au moins 2 PLATINUM
             if plat_cnt >= 2 and can_buy(CardName.PROVINCE):
                 return do_buy(CardName.PROVINCE)
             
-            # 3. Platinium (9) - priorité absolue pour l'économie (cap à 3)
-            if can_buy(CardName.PLATINIUM) and plat_cnt < 3:
-                return do_buy(CardName.PLATINIUM)
+            # 3. PLATINUM (9) - priorité absolue pour l'économie (cap à 3)
+            if can_buy(CardName.PLATINUM) and plat_cnt < 3:
+                return do_buy(CardName.PLATINUM)
             
             # 4. Gold (6) - économie secondaire
             if can_buy(CardName.GOLD):
@@ -293,7 +293,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             if can_buy(CardName.SILVER):
                 return do_buy(CardName.SILVER)
             
-            # Fin de partie : acheter des cartes victoire même sans Platinium optimal
+            # Fin de partie : acheter des cartes victoire même sans PLATINUM optimal
             if colony_left <= 3 or prov_left <= 3:
                 if can_buy(CardName.COLONY):
                     return do_buy(CardName.COLONY)
@@ -316,7 +316,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             wt_cnt  = owned(game_id, CardName.WITCH)
             lab_cnt = owned(game_id, CardName.LABORATORY)
             gd_cnt  = owned(game_id, CardName.GOLD)
-            plat_cnt = owned(game_id, CardName.PLATINIUM)
+            plat_cnt = owned(game_id, CardName.PLATINUM)
             rc_cnt  = owned(game_id, CardName.HIRELING)
  
             curses_left   = stock.get(CardName.CURSE, 0) if CardName.CURSE in stock else 0
@@ -339,9 +339,9 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
                 if curses_left > 0 and wt_cnt < 1 and can_buy(CardName.WITCH):
                     return do_buy(CardName.WITCH)
  
-                # 1b) Platinium à 9$ (cap 1 en early)
-                if can_buy(CardName.PLATINIUM) and plat_cnt < 1:
-                    return do_buy(CardName.PLATINIUM)
+                # 1b) PLATINUM à 9$ (cap 1 en early)
+                if can_buy(CardName.PLATINUM) and plat_cnt < 1:
+                    return do_buy(CardName.PLATINUM)
  
                 # 1c) À 6$ : HIRELING > GOLD (cap 2 en early)
                 if can_buy(CardName.HIRELING) and rc_cnt < 2:
@@ -372,9 +372,9 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
                 if can_buy(CardName.LABORATORY) and lab_cnt < 2:
                     return do_buy(CardName.LABORATORY)
  
-                # 2c) Platinium à 9$ (cap 2)
-                if can_buy(CardName.PLATINIUM) and plat_cnt < 2:
-                    return do_buy(CardName.PLATINIUM)
+                # 2c) PLATINUM à 9$ (cap 2)
+                if can_buy(CardName.PLATINUM) and plat_cnt < 2:
+                    return do_buy(CardName.PLATINUM)
  
                 # 2d) HIRELING à 6$ (cap 3 global)
                 if can_buy(CardName.HIRELING) and rc_cnt < 3:
@@ -404,9 +404,9 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             if AGGRO_DUCHY and can_buy(CardName.DUCHY):
                 return do_buy(CardName.DUCHY)
  
-            # Platinium (cap 3)
-            if can_buy(CardName.PLATINIUM) and plat_cnt < 3:
-                return do_buy(CardName.PLATINIUM)
+            # PLATINUM (cap 3)
+            if can_buy(CardName.PLATINUM) and plat_cnt < 3:
+                return do_buy(CardName.PLATINUM)
  
             # À 6$ : HIRELING (cap 3) > GOLD (cap 2)
             if can_buy(CardName.HIRELING) and rc_cnt < 3:
