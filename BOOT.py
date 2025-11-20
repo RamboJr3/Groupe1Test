@@ -239,66 +239,7 @@ SCORE_DELTA = 4               # si un adversaire te distance de >= 4 PV, on forc
 ENGINE_PROVINCE_MONEY = 12    # seuil d'argent dans un tour pour considérer que l'engine peut enchaîner les Provinces
 DOUBLE_PROVINCE_BUYS = 2      # nb de buys requis pour envisager double Province dans le même tour
 
-def decide_action(hand, stock, num_players, ts):
-    """
-    Action selector compatible Colonies.
-    2 joueurs : pas d'actions (Big Money pur).
-    3-4 joueurs : priorité moteur puis attaques.
-    """
-    # Big Money pur en 2J = pas d'action
-    if num_players == 2:
-        return None
 
-    priority = [
-        CardName.MARKET,
-        CardName.LABORATORY,
-        CardName.VILLAGE,
-        CardName.FESTIVAL,
-        CardName.HIRELING,
-        CardName.WITCH,
-        CardName.SMITHY,
-        CardName.WOODCUTTER,
-    ]
-
-    for c in priority:
-        if hand.get(c, 0) > 0:
-            return c
-
-    return None
-
-def decide_buy(stock, money_available, can_buy, owned, game_id, num_players, ts):
-    """
-    Buy decision logic for 2 players (Big Money Colonies).
-    3+ players : renvoie None (le code principal gère tout).
-    """
-    money = money_available()
-
-    # 3–4 joueurs → retour None, laisser la Rhum & Ruin strat s'exécuter
-    if num_players > 2:
-        return None
-
-    # ----------- 2 JOUEURS : BIG MONEY COLONIES -----------
-    # Priorité absolue : Colony
-    if money >= 11 and can_buy(CardName.COLONY):
-        return CardName.COLONY
-
-    # Province
-    if money >= 8 and can_buy(CardName.PROVINCE):
-        return CardName.PROVINCE
-
-    # Platinum
-    if money >= 9 and can_buy(CardName.PLATINUM):
-        return CardName.PLATINUM
-
-    # Gold
-    if money >= 6 and can_buy(CardName.GOLD):
-        return CardName.GOLD
-
-    # Silver
-    if money >= 3 and can_buy(CardName.SILVER):
-        return CardName.SILVER
-
-    return None
 
  
 @app.post("/play")
@@ -322,96 +263,94 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
     num_players = len(game.players)
 
     # =====================================================================
-    # BRANCHE 2 JOUEURS : STRAT RUIN LA PROMO (VincentBM / 2J)
+    # BRANCHE 2 JOUEURS : STRATÉGIE OPTIMALE WITCH + PLATINUM + COLONY
     # =====================================================================
+
     if num_players == 2:
-    # === PHASE ACTION ===
-        if ts.get("actions", 0) > 0:
-            act = decide_action(hand, stock, num_players, ts)
 
-            if act:  # act est un CardName
-                print(f"[play_action] game={game_id} ACTION {act}")
+        # === PHASE ACTION ===
+        if ts["actions"] > 0:
+            # Une seule action utile en 2J : Witch
+            if hand.get(CardName.WITCH, 0):
+                print(f"[play_action] game={game_id} ACTION WITCH")
 
-                # Appliquer les effets si connus
-                if act.name in EFFECTS:
-                    add_actions, add_buys, add_coins, _ = EFFECTS[act]
-
-                    ts["actions"] -= 1      # on dépense 1 action
-                    ts["actions"] += add_actions
-                    ts["buys"] += add_buys
-                    ts["coins_bonus"] += add_coins
+                if "WITCH" in EFFECTS:
+                    addA, addB, addC, _ = EFFECTS["WITCH"]
+                    ts["actions"] -= 1
+                    ts["actions"] += addA
+                    ts["buys"] += addB
+                    ts["coins_bonus"] += addC
 
                 return DopynionResponseStr(
                     game_id=game_id,
-                    decision=f"ACTION {act}"
+                    decision="ACTION WITCH"
                 )
 
-
         # === PHASE ACHAT ===
-        def money_available_2j() -> int:
+        def money_2j():
             copper = hand.get(CardName.COPPER, 0)
             silver = hand.get(CardName.SILVER, 0)
             gold = hand.get(CardName.GOLD, 0)
+            platinum = hand.get(CardName.PLATINUM, 0)
+            cursedgold = hand.get(getattr(CardName, "CURSEDGOLD", None), 0)
             bonus = ts.get("coins_bonus", 0)
             spent = ts.get("coins_spent", 0)
 
-            CURSEDGOLD_card = getattr(CardName, "CURSEDGOLD", None)
-            CURSEDGOLD = hand.get(CURSEDGOLD_card, 0) if CURSEDGOLD_card else 0
+            return copper*1 + silver*2 + gold*3 + platinum*5 + cursedgold*3 + bonus - spent
 
-            result = copper * 1 + silver * 2 + gold * 3 + CURSEDGOLD * 3 + bonus - spent
-            print(
-                f"[money] game={game_id} copper={copper} silver={silver} gold={gold} "
-                f"CURSEDGOLD={CURSEDGOLD} bonus={bonus} spent={spent} => total={result}"
-            )
-            return result
-
-        def can_buy_2j(c: CardName) -> bool:
-            can = (
+        def can_buy(c):
+            return (
                 ts["buys"] > 0
-                and c in COST
                 and stock.get(c, 0) > 0
-                and money_available_2j() >= COST[c]
+                and money_2j() >= COST[c]
             )
-            if not can:
-                print(
-                    f"[can_buy] game={game_id} card={c} buys={ts['buys']} "
-                    f"in_cost={c in COST} in_stock={stock.get(c, 0)} "
-                    f"money={money_available_2j()} cost={COST.get(c, '?')} => {can}"
-                )
-            return can
 
-        def do_buy_2j(c: CardName) -> DopynionResponseStr:
-            # Achat générique compatible Colony / Platinum
-            cost = COST.get(c, 999)
-
+        def do_buy(c):
+            cost = COST[c]
             ts["buys"] -= 1
             ts["coins_spent"] += cost
             inc_owned(game_id, c)
 
-            print(
-                f"[buy] game={game_id} BUY {c} cost={cost} "
-                f"buys_left={ts['buys']} turn={ts.get('turn', 0)}"
-            )
-
-            return DopynionResponseStr(
-                game_id=game_id,
-                decision=f"BUY {c}"
-            )
+            print(f"[buy] game={game_id} BUY {c.name} cost={cost}")
+            return DopynionResponseStr(game_id=game_id, decision=f"BUY {c.name}")
 
 
-        buy_decision = decide_buy(
-            stock=stock,
-            money_available=money_available_2j,
-            can_buy=can_buy_2j,
-            owned=owned,
-            game_id=game_id,
-            num_players=num_players,
-            ts=ts,
-        )
-        if buy_decision:
-            return do_buy_2j(buy_decision)
+        money = money_2j()
+        witch_count = owned(game_id, CardName.WITCH)
+        curses_left = stock.get(CardName.CURSE, 0)
+        colony_left = stock.get(CardName.COLONY, 99)
+        prov_left = stock.get(CardName.PROVINCE, 99)
+
+        # (1) Witch early
+        if curses_left > 0 and witch_count < 2 and money >= 5 and can_buy(CardName.WITCH):
+            return do_buy(CardName.WITCH)
+
+        # (2) Colony
+        if money >= 11 and can_buy(CardName.COLONY):
+            return do_buy(CardName.COLONY)
+
+        # (3) Platinum
+        if money >= 9 and can_buy(CardName.PLATINUM):
+            return do_buy(CardName.PLATINUM)
+
+        # (4) Province
+        if money >= 8 and can_buy(CardName.PROVINCE):
+            return do_buy(CardName.PROVINCE)
+
+        # (5) Gold
+        if money >= 6 and can_buy(CardName.GOLD):
+            return do_buy(CardName.GOLD)
+
+        # (6) Silver
+        if money >= 3 and can_buy(CardName.SILVER):
+            return do_buy(CardName.SILVER)
+
+        # (7) Duchy endgame
+        if (colony_left <= 3 or prov_left <= 3) and money >= 5 and can_buy(CardName.DUCHY):
+            return do_buy(CardName.DUCHY)
 
         return DopynionResponseStr(game_id=game_id, decision="END_TURN")
+
 
     # =====================================================================
     # BRANCHE 3–4 JOUEURS : STRAT RHUM & RUIN COMPLÈTE
@@ -426,6 +365,7 @@ def play(game: Game, game_id: GameIdDependency) -> DopynionResponseStr:
             hq(CardName.COPPER) * 1
             + hq(CardName.SILVER) * 2
             + hq(CardName.GOLD) * 3
+            + hq(CardName.PLATINUM) * 5
         )
 
     def money_available() -> int:
